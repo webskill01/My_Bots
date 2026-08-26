@@ -639,3 +639,128 @@ def test_callback_data_fits_telegrams_64_byte_limit(ledger, user):
     for _, kb in views:
         for b in _all_buttons(kb):
             assert len(b.callback_data.encode()) <= 64, b.callback_data
+
+
+# --- migration --------------------------------------------------------------
+
+def test_init_adds_budget_columns_to_an_existing_database():
+    """The VM already has a finance.db from before budgets existed."""
+    c = dbm.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE user (user_id INTEGER PRIMARY KEY, tz TEXT NOT NULL
+            DEFAULT 'Asia/Kolkata', currency TEXT NOT NULL DEFAULT '₹',
+            created_at TEXT NOT NULL);
+    """)
+    c.execute("INSERT INTO user (user_id, created_at) VALUES (1, '2026-01-01')")
+    dbm.init(c)
+    row = dbm.get_or_create_user(c, 1)
+    assert row["budget"] == 0
+    assert row["alert_month"] is None
+    assert row["created_at"] == "2026-01-01"     # existing data survives
+    c.close()
+
+
+# --- monthly budget ---------------------------------------------------------
+
+def _budget(conn, amount):
+    dbm.set_setting(conn, A, "budget", amount)
+    return dbm.get_or_create_user(conn, A)
+
+
+def test_no_alert_when_no_budget_is_set(ledger, user):
+    assert botm.budget_alert(ledger, user, D3) is None
+
+
+def test_no_alert_below_eighty_percent(ledger):
+    u = _budget(ledger, 1000000)          # ₹10,000 vs ₹1,600 spent
+    assert botm.budget_alert(ledger, u, D3) is None
+
+
+def test_alert_at_eighty_percent(ledger):
+    u = _budget(ledger, 200000)           # ₹2,000; spent ₹1,600 is exactly 80%
+    msg = botm.budget_alert(ledger, u, D3)
+    assert msg is not None
+    assert "80%" in msg and "₹1,600" in msg and "₹2,000" in msg
+    assert "₹400" in msg                  # what's left
+
+
+def test_alert_when_over_budget(ledger):
+    u = _budget(ledger, 100000)           # ₹1,000; spent ₹1,600
+    msg = botm.budget_alert(ledger, u, D3)
+    assert "Over budget" in msg and "₹600" in msg   # the overshoot
+
+
+def test_each_level_warns_only_once_a_month(ledger):
+    u = _budget(ledger, 200000)
+    assert botm.budget_alert(ledger, u, D3) is not None
+    u = dbm.get_or_create_user(ledger, A)
+    assert botm.budget_alert(ledger, u, D3) is None
+    assert botm.budget_alert(ledger, dbm.get_or_create_user(ledger, A), D3) is None
+
+
+def test_crossing_a_higher_level_warns_again(ledger):
+    u = _budget(ledger, 200000)
+    assert "80%" in botm.budget_alert(ledger, u, D3)
+    u = _budget(ledger, 100000)           # budget cut: now over
+    assert "Over budget" in botm.budget_alert(ledger, u, D3)
+
+
+def test_dropping_back_does_not_re_warn(ledger):
+    u = _budget(ledger, 100000)
+    assert "Over budget" in botm.budget_alert(ledger, u, D3)
+    u = _budget(ledger, 190000)           # now at 84%, level 80
+    assert botm.budget_alert(ledger, u, D3) is None
+
+
+def test_the_alert_resets_next_month(ledger):
+    u = _budget(ledger, 200000)
+    assert botm.budget_alert(ledger, u, D3) is not None
+    sept = dt.date(2026, 9, 15)
+    u = dbm.get_or_create_user(ledger, A)
+    assert botm.budget_alert(ledger, u, sept) is None      # nothing spent in Sept
+    dbm.add_entry(ledger, A, "exp", 200000, "rent", None, sept)
+    assert "Over budget" in botm.budget_alert(ledger, u, sept)
+
+
+def test_budget_counts_only_the_current_month(ledger):
+    dbm.add_entry(ledger, A, "exp", 5000000, "car", None, dt.date(2026, 7, 15))
+    u = _budget(ledger, 200000)
+    msg = botm.budget_alert(ledger, u, D3)
+    assert "₹1,600" in msg      # July's ₹50,000 is not August's problem
+
+
+def test_earnings_do_not_count_against_the_budget(ledger):
+    dbm.add_entry(ledger, A, "earn", 9000000, "bonus", None, D3)
+    u = _budget(ledger, 200000)
+    assert "₹1,600" in botm.budget_alert(ledger, u, D3)
+
+
+def test_summary_shows_the_budget_line_for_the_month(ledger):
+    u = _budget(ledger, 200000)
+    text, _ = botm.summary_view(ledger, u, Ctx(("month", None)))
+    assert "Budget" in text
+    text, _ = botm.summary_view(ledger, u, Ctx(("all", None)))
+    assert "Budget" not in text   # the budget is monthly; other periods would lie
+
+
+def test_settings_shows_the_budget(ledger):
+    u = _budget(ledger, 200000)
+    assert "₹2,000 / month" in botm.settings_view(ledger, u)[0]
+    u = _budget(ledger, 0)
+    assert "not set" in botm.settings_view(ledger, u)[0]
+
+
+# --- created_at renders in the user's timezone ------------------------------
+
+def test_filed_time_is_shown_in_the_users_timezone(ledger, user):
+    eid = dbm.list_entries(ledger, A, D1, D3)[0]["id"]
+    stamp = dbm.get_entry(ledger, A, eid)["created_at"]
+    utc = dt.datetime.fromisoformat(stamp)
+    ist = botm._local(stamp, user)
+    assert ist.utcoffset() == dt.timedelta(hours=5, minutes=30)
+    assert ist.hour == (utc.hour + 5 + (utc.minute + 30) // 60) % 24
+
+
+def test_filed_time_handles_a_naive_legacy_timestamp(ledger, user):
+    naive = botm._local("2026-08-26T16:11:25", user)
+    assert naive.hour == 21 and naive.minute == 41    # 16:11 UTC is 21:41 IST

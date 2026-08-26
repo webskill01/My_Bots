@@ -1,5 +1,6 @@
 """Handlers and keyboards. No SQL, no regex — those live in db.py and parse.py."""
 
+import calendar
 import datetime as dt
 import html
 import logging
@@ -48,6 +49,15 @@ def _date(iso: str) -> dt.date:
 
 def _fmt_date(d: dt.date) -> str:
     return d.strftime("%d %b")
+
+
+def _local(created_at: str, user) -> dt.datetime:
+    """created_at is stored in UTC — correct for a record, useless to read.
+    Show it in the user's own timezone."""
+    stamp = dt.datetime.fromisoformat(created_at)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp.astimezone(ZoneInfo(user["tz"]))
 
 
 def _who(update: Update, context) -> tuple:
@@ -132,6 +142,11 @@ def summary_view(conn, user, context) -> tuple[str, Kb]:
              f"Spent    {_money(s['spent'], user)}",
              f"Net      {'+' if s['net'] >= 0 else ''}{_money(s['net'], user)}"]
 
+    if user["budget"] and _period(context)[0] == "month":
+        left = user["budget"] - s["spent"]
+        lines.append(f"Budget   {_money(user['budget'], user)} · "
+                     f"{_money(abs(left), user)} {'left' if left >= 0 else 'over'}")
+
     if s["top"]:
         top = " · ".join(f"{_e(t['name']) or '—'} {_money(t['total'], user)}"
                          for t in s["top"])
@@ -140,7 +155,8 @@ def summary_view(conn, user, context) -> tuple[str, Kb]:
         lines += ["", "Nothing recorded in this period yet."]
     elif start > dt.date.min:
         days = (end - start).days + 1
-        lines.append(f"{s['count']} entries · {_money(s['spent'] // days, user)}/day avg")
+        avg = s["spent"] // days // 100 * 100   # whole rupees; paise here are noise
+        lines.append(f"{s['count']} entries · {_money(avg, user)}/day avg")
     else:
         lines.append(f"{s['count']} entries")  # "all time" has no meaningful daily avg
 
@@ -208,13 +224,13 @@ def entry_view(conn, user, entry_id: int) -> tuple[str, Kb] | None:
     row = db.get_entry(conn, user["user_id"], entry_id)
     if row is None:
         return None
-    filed = row["created_at"][:16].replace("T", " ")
+    filed = _local(row["created_at"], user).strftime("%d %b %Y, %H:%M")
     kind = "Earning" if row["kind"] == "earn" else "Expense"
     lines = [f"<b>{kind}</b> · {_signed(row, user)}",
              f"Name: {_e(row['name']) or '—'}",
              f"Category: {_e(row['category_name']) if row['category_name'] else '—'}",
              f"Date: {_date(row['on_date']).strftime('%a, %d %b %Y')}",
-             f"<i>filed {filed} UTC</i>"]
+             f"<i>filed {filed}</i>"]
     return "\n".join(lines), entry_kb(entry_id)
 
 
@@ -288,13 +304,52 @@ def cat_view(conn, user, context, cat_id: int, page: int) -> tuple[str, Kb]:
 
 
 def settings_view(conn, user) -> tuple[str, Kb]:
+    budget = (f"{_money(user['budget'], user)} / month" if user["budget"] else "not set")
     return ("⚙️ <b>Settings</b>\n\n"
             f"Timezone: <code>{_e(user['tz'])}</code>\n"
-            f"Currency: <code>{_e(user['currency'])}</code>\n\n"
+            f"Currency: <code>{_e(user['currency'])}</code>\n"
+            f"Budget: <code>{_e(budget)}</code>\n\n"
             "<i>Timezone decides what counts as \"today\".</i>",
             Kb([[Btn("🌏 Timezone", callback_data="set:tz"),
                  Btn("💱 Currency", callback_data="set:cur")],
+                [Btn("🎯 Monthly budget", callback_data="set:budget")],
                 [Btn("← Back", callback_data="menu")]]))
+
+
+# --- monthly budget ---------------------------------------------------------
+
+BUDGET_LEVELS = (100, 80)   # checked high to low; the first match wins
+
+
+def budget_alert(conn, user, today: dt.date | None = None) -> str | None:
+    """Message to send, or None. Records the crossing, so one budget breach
+    produces one warning rather than one per entry for the rest of the month."""
+    budget = user["budget"]
+    if not budget:
+        return None
+
+    today = today or db.user_today(user)
+    spent = db.summary(conn, user["user_id"], today.replace(day=1), today)["spent"]
+    level = next((pct for pct in BUDGET_LEVELS if spent * 100 >= budget * pct), 0)
+    if not level:
+        return None
+
+    month = today.strftime("%Y-%m")
+    if user["alert_month"] == month and (user["alert_level"] or 0) >= level:
+        return None
+    db.record_alert(conn, user["user_id"], month, level)
+
+    left = budget - spent
+    days = calendar.monthrange(today.year, today.month)[1] - today.day
+    remaining = (f"{days} days left in the month" if days
+                 else "and it's the last day of the month")
+    if level == 100:
+        return (f"🚨 <b>Over budget.</b>\n"
+                f"{_money(spent, user)} of {_money(budget, user)} this month — "
+                f"{_money(-left, user)} over, with {remaining}.")
+    return (f"⚠️ <b>80% of your monthly budget.</b>\n"
+            f"{_money(spent, user)} of {_money(budget, user)} — "
+            f"{_money(left, user)} left, with {remaining}.")
 
 
 def category_picker(conn, user, entry_id: int) -> tuple[str, Kb]:
@@ -381,8 +436,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     cat_id = db.get_or_create_category(conn, uid, p.category) if p.category else None
-    entry_id = db.add_entry(conn, uid, forced or p.kind, p.amount, p.name, cat_id, p.on_date)
+    kind = forced or p.kind
+    entry_id = db.add_entry(conn, uid, kind, p.amount, p.name, cat_id, p.on_date)
     await _confirm(update.message, conn, user, entry_id)
+
+    if kind == "exp" and (alert := budget_alert(conn, user)):
+        await update.message.reply_text(alert, parse_mode=ParseMode.HTML)
 
 
 async def _handle_pending(update, context, conn, user, pending, text) -> bool:
@@ -472,6 +531,17 @@ async def _handle_pending(update, context, conn, user, pending, text) -> bool:
                         parse_mode=ParseMode.HTML)
             return True
         db.set_setting(conn, uid, "tz", text)
+        body, kb = settings_view(conn, db.get_or_create_user(conn, uid))
+        await reply(body, reply_markup=kb, parse_mode=ParseMode.HTML)
+        return True
+
+    if what == "budget":
+        amount = parse.parse_amount(text)
+        if amount is None:
+            context.user_data["pending"] = pending
+            await reply("That isn't an amount. Try 20000, or 0 to switch it off.")
+            return True
+        db.set_setting(conn, uid, "budget", amount)
         body, kb = settings_view(conn, db.get_or_create_user(conn, uid))
         await reply(body, reply_markup=kb, parse_mode=ParseMode.HTML)
         return True
@@ -575,6 +645,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif rest == "cur":
             context.user_data["pending"] = {"what": "currency"}
             await q.message.reply_text("Send a currency symbol, e.g. ₹")
+        elif rest == "budget":
+            context.user_data["pending"] = {"what": "budget"}
+            await q.message.reply_text(
+                "What's your monthly spending budget? e.g. 20000\n"
+                "I'll warn you once at 80% and once when you go over.\n"
+                "Send 0 to switch it off.")
         else:
             await _show(q, settings_view(conn, user))
 

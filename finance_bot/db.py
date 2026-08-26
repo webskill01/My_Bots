@@ -34,7 +34,17 @@ CREATE TABLE IF NOT EXISTS entry (
 CREATE INDEX IF NOT EXISTS entry_user_date ON entry(user_id, on_date);
 """
 
-_SETTINGS = {"tz", "currency"}
+# Columns added after the first release. Listed here rather than in SCHEMA so
+# there is one source of truth: a fresh database and an existing one on disk
+# both get them through the same ALTER.
+# ponytail: add-column only. Enough until something needs a real migration tool.
+_LATER_COLUMNS = [
+    ("user", "budget", "INTEGER NOT NULL DEFAULT 0"),   # paise/month, 0 = off
+    ("user", "alert_month", "TEXT"),                    # 'YYYY-MM' last alerted
+    ("user", "alert_level", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+_SETTINGS = {"tz", "currency", "budget"}
 _EDITABLE = {"kind", "amount", "name", "category_id", "on_date"}
 
 ANY_CATEGORY = object()  # distinct from None, which means "uncategorized"
@@ -49,6 +59,10 @@ def connect(path: str) -> sqlite3.Connection:
 
 def init(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    for table, column, decl in _LATER_COLUMNS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     conn.commit()
 
 
@@ -230,3 +244,11 @@ def category_totals(conn, user_id: int, start, end):
         " GROUP BY e.category_id"
         " ORDER BY (c.name IS NULL), total DESC",
         (user_id, _iso(start), _iso(end))).fetchall()
+
+
+def record_alert(conn, user_id: int, month: str, level: int) -> None:
+    """Remember that we already warned this user, so one budget crossing
+    produces one message rather than one per entry."""
+    conn.execute("UPDATE user SET alert_month = ?, alert_level = ? WHERE user_id = ?",
+                 (month, level, user_id))
+    conn.commit()

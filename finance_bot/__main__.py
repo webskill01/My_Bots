@@ -20,10 +20,29 @@ def load_env(path: str = ".env") -> None:
         pass
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+def setup_logging() -> None:
+    """Routine logs to stdout, trouble to stderr.
+
+    logging's default is stderr for everything, which makes pm2 file every
+    INFO line in the error log and paint it red. Splitting the streams means
+    red in `pm2 logs` genuinely means something went wrong.
+    """
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    out = logging.StreamHandler(sys.stdout)
+    out.setFormatter(fmt)
+    out.addFilter(lambda record: record.levelno < logging.WARNING)
+
+    err = logging.StreamHandler(sys.stderr)
+    err.setFormatter(fmt)
+    err.setLevel(logging.WARNING)
+
+    logging.basicConfig(level=logging.INFO, handlers=[out, err])
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def main() -> None:
+    setup_logging()
 
     load_env()
     token = os.environ.get("BOT_TOKEN")

@@ -37,7 +37,13 @@ else is an expense. Dates accept `today`, `yesterday`, `Nd`, `24/8`,
 - **📝 Entries** — every entry, paged, tap to edit or delete
 - **📂 Categories** — totals per category, tap for that category's full list
 - **💰 Add earning** — guided path if you'd rather tap than type
-- **⚙️ Settings** — timezone and currency
+- **⚙️ Settings** — timezone, currency and monthly budget
+
+## Monthly budget
+
+Set one in Settings and the bot warns you twice a month, at most: once when you
+cross 80% of it, and once when you go over. Expenses only — earnings don't
+offset it. It resets on the 1st.
 
 ## Sharing with friends
 
