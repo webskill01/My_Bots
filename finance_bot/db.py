@@ -53,7 +53,7 @@ def init(conn: sqlite3.Connection) -> None:
 
 
 def _now() -> str:
-    return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def _iso(d) -> str:

@@ -1,0 +1,22 @@
+[Unit]
+Description=Telegram finance tracker bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/my-bots
+ExecStart=/opt/my-bots/.venv/bin/python -m finance_bot
+Restart=always
+RestartSec=5
+
+# The bot only needs its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/my-bots
+
+[Install]
+WantedBy=multi-user.target
