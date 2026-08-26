@@ -492,3 +492,150 @@ def test_paging_entries(ledger):
     assert len(page1) == len(page2) == 3
     assert not {r["id"] for r in page1} & {r["id"] for r in page2}
     assert dbm.count_entries(ledger, A, D1, D3) == 8
+
+
+# --- views render without a telegram connection -----------------------------
+
+from finance_bot import bot as botm
+
+
+class Ctx:
+    """Just enough of a PTB context for the view functions."""
+    def __init__(self, period=("all", None)):
+        self.user_data = {"period": period}
+
+
+@pytest.fixture
+def user(ledger):
+    return dbm.get_or_create_user(ledger, A)
+
+
+def _all_buttons(kb):
+    return [b for row in (kb.inline_keyboard if kb else []) for b in row]
+
+
+def test_summary_view_shows_the_totals(ledger, user):
+    text, kb = botm.summary_view(ledger, user, Ctx())
+    assert "₹1,600" in text      # spent
+    assert "₹6,000" in text      # earned
+    assert "+₹4,400" in text     # net
+    assert kb is not None
+
+
+def test_summary_view_of_an_empty_ledger(conn):
+    text, _ = botm.summary_view(conn, dbm.get_or_create_user(conn, A), Ctx())
+    assert "Nothing recorded" in text
+
+
+def test_day_view_lists_that_days_entries(ledger, user):
+    text, kb = botm.day_view(ledger, user, D3)
+    for name in ("rent", "bus", "freelance"):
+        assert name in text
+    assert "chai" not in text          # that was D1
+    assert "+₹1,000" in text           # the earning is signed
+    assert _all_buttons(kb)
+
+
+def test_day_view_hides_next_on_a_future_day(ledger, user):
+    _, kb = botm.day_view(ledger, user, dbm.user_today(user) + dt.timedelta(days=5))
+    assert not any("Next" in b.text for b in _all_buttons(kb))
+
+
+def test_day_view_of_an_empty_day(ledger, user):
+    text, _ = botm.day_view(ledger, user, dt.date(2020, 1, 1))
+    assert "No entries." in text
+
+
+def test_entries_view_gives_one_button_per_entry(ledger, user):
+    text, kb = botm.entries_view(ledger, user, Ctx(), 0)
+    entry_buttons = [b for b in _all_buttons(kb) if b.callback_data.startswith("e:")]
+    assert len(entry_buttons) == 8
+    assert "8 total" in text
+
+
+def test_entries_view_pages(ledger, user):
+    for i in range(20):
+        dbm.add_entry(ledger, A, "exp", 100 + i, f"item{i}", None, D2)
+    _, kb1 = botm.entries_view(ledger, user, Ctx(), 0)
+    labels = [b.text for b in _all_buttons(kb1)]
+    assert any("Older" in x for x in labels)
+    assert not any("Newer" in x for x in labels)   # no page before the first
+    _, kb2 = botm.entries_view(ledger, user, Ctx(), 1)
+    assert any("Newer" in b.text for b in _all_buttons(kb2))
+
+
+def test_entry_view_shows_detail_and_filing_time(ledger, user):
+    eid = dbm.list_entries(ledger, A, D1, D3)[0]["id"]
+    text, _ = botm.entry_view(ledger, user, eid)
+    assert "filed" in text
+
+
+def test_entry_view_of_someone_elses_entry_is_none(ledger):
+    eid = dbm.list_entries(ledger, A, D1, D3)[0]["id"]
+    assert botm.entry_view(ledger, dbm.get_or_create_user(ledger, B), eid) is None
+
+
+def test_cats_view_lists_categories_and_uncategorized(ledger, user):
+    text, kb = botm.cats_view(ledger, user, Ctx())
+    assert "Food" in text and "Travel" in text and "Uncategorized" in text
+    assert "₹400" in text     # food: chai + lunch
+    assert "₹850" in text     # uncategorized: misc + rent
+
+
+def test_cats_view_shows_an_empty_category(ledger, user):
+    dbm.create_category(ledger, A, "Rent")
+    text, _ = botm.cats_view(ledger, user, Ctx())
+    assert "Rent" in text
+
+
+def test_cat_view_lists_only_that_categorys_expenses(ledger, user):
+    food = dbm.find_category(ledger, A, "Food")["id"]
+    text, _ = botm.cat_view(ledger, user, Ctx(), food, 0)
+    assert "chai" in text and "lunch" in text
+    assert "auto" not in text
+
+
+def test_cat_view_uncategorized_bucket(ledger, user):
+    text, _ = botm.cat_view(ledger, user, Ctx(), 0, 0)
+    assert "misc" in text and "rent" in text
+    assert "salary" not in text    # earnings are not spending
+
+
+def test_cat_view_of_a_deleted_category(ledger, user):
+    text, _ = botm.cat_view(ledger, user, Ctx(), 9999, 0)
+    assert "gone" in text
+
+
+def test_settings_view(ledger, user):
+    text, _ = botm.settings_view(ledger, user)
+    assert "Asia/Kolkata" in text
+
+
+# --- the bug that would actually bite ---------------------------------------
+
+def test_user_text_is_html_escaped_everywhere(ledger, user):
+    dbm.add_entry(ledger, A, "exp", 100, "<b>hack</b> & co", None, D3)
+    dbm.create_category(ledger, A, "<i>tag</i>")
+    for text, _ in [botm.day_view(ledger, user, D3),
+                    botm.entries_view(ledger, user, Ctx(), 0),
+                    botm.cats_view(ledger, user, Ctx()),
+                    botm.summary_view(ledger, user, Ctx())]:
+        assert "<b>hack</b>" not in text
+        assert "&lt;b&gt;hack&lt;/b&gt;" in text or "hack" not in text
+
+
+def test_callback_data_fits_telegrams_64_byte_limit(ledger, user):
+    views = [botm.summary_view(ledger, user, Ctx()),
+             botm.day_view(ledger, user, D3),
+             botm.entries_view(ledger, user, Ctx(), 0),
+             botm.cats_view(ledger, user, Ctx()),
+             botm.cat_view(ledger, user, Ctx(), 0, 0),
+             botm.settings_view(ledger, user),
+             botm.category_picker(ledger, user, 1),
+             botm.date_picker(1, D3),
+             (None, botm.menu_kb()),
+             (None, botm.period_kb("sum")),
+             (None, botm.entry_kb(1, fresh=True))]
+    for _, kb in views:
+        for b in _all_buttons(kb):
+            assert len(b.callback_data.encode()) <= 64, b.callback_data
