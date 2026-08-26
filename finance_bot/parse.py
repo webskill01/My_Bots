@@ -119,3 +119,40 @@ def parse_entry(text: str, today: dt.date) -> Parsed | None:
     name = " ".join((m.group(3) or "").split())
     kind = "earn" if m.group(1) == "+" else "exp"
     return Parsed(kind, amount, name, category, on_date)
+
+
+def period_range(key: str, today: dt.date, n: int | None = None) -> tuple[dt.date, dt.date]:
+    """Inclusive (start, end) for a named period. End is always today."""
+    if key == "week":
+        return today - dt.timedelta(days=today.weekday()), today
+    if key == "month":
+        return today.replace(day=1), today
+    if key == "7d":
+        return today - dt.timedelta(days=6), today
+    if key == "30d":
+        return today - dt.timedelta(days=29), today
+    if key == "nd":
+        return today - dt.timedelta(days=max(1, n or 1) - 1), today
+    if key == "all":
+        return dt.date.min, today
+    raise ValueError(f"unknown period: {key}")
+
+
+def _group_indian(digits: str) -> str:
+    """123456 -> 1,23,456. Last three, then pairs."""
+    if len(digits) <= 3:
+        return digits
+    head, parts = digits[:-3], [digits[-3:]]
+    while len(head) > 2:
+        parts.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        parts.insert(0, head)
+    return ",".join(parts)
+
+
+def fmt_money(paise: int, symbol: str) -> str:
+    sign = "-" if paise < 0 else ""
+    rupees, rem = divmod(abs(paise), 100)
+    tail = f".{rem:02d}" if rem else ""
+    return f"{sign}{symbol}{_group_indian(str(rupees))}{tail}"

@@ -171,3 +171,46 @@ def test_earning_with_category_and_date():
 ])
 def test_parse_date(token, expected):
     assert parse.parse_date(token, TODAY) == expected
+
+
+# --- periods and formatting -------------------------------------------------
+
+@pytest.mark.parametrize("key,n,start,end", [
+    ("week",  None, dt.date(2026, 8, 24), TODAY),   # Monday of this week
+    ("month", None, dt.date(2026, 8, 1),  TODAY),
+    ("7d",    None, dt.date(2026, 8, 20), TODAY),   # inclusive of today
+    ("30d",   None, dt.date(2026, 7, 28), TODAY),
+    ("nd",    3,    dt.date(2026, 8, 24), TODAY),
+    ("nd",    1,    TODAY,                TODAY),
+])
+def test_period_range(key, n, start, end):
+    assert parse.period_range(key, TODAY, n) == (start, end)
+
+
+def test_period_range_all_covers_everything():
+    start, end = parse.period_range("all", TODAY)
+    assert start <= dt.date(1, 1, 1)
+    assert end == TODAY
+
+
+def test_week_on_a_monday_is_just_that_day():
+    monday = dt.date(2026, 8, 24)
+    assert parse.period_range("week", monday) == (monday, monday)
+
+
+@pytest.mark.parametrize("paise,expected", [
+    (0, "₹0"),
+    (25000, "₹250"),
+    (25050, "₹250.50"),
+    (5, "₹0.05"),
+    (100000, "₹1,000"),
+    (300000, "₹3,000"),
+    (12345650, "₹1,23,456.50"),
+    (-25000, "-₹250"),
+])
+def test_fmt_money(paise, expected):
+    assert parse.fmt_money(paise, "₹") == expected
+
+
+def test_fmt_money_uses_the_given_symbol():
+    assert parse.fmt_money(25000, "$") == "$250"
