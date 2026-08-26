@@ -193,3 +193,40 @@ def delete_category(conn, user_id: int, category_id: int) -> bool:
                        (category_id, user_id))
     conn.commit()
     return cur.rowcount > 0
+
+
+# --- reports ----------------------------------------------------------------
+
+def summary(conn, user_id: int, start, end) -> dict:
+    args = (user_id, _iso(start), _iso(end))
+    row = conn.execute(
+        "SELECT COALESCE(SUM(CASE WHEN kind = 'exp'  THEN amount END), 0) AS spent,"
+        "       COALESCE(SUM(CASE WHEN kind = 'earn' THEN amount END), 0) AS earned,"
+        "       COUNT(*) AS count"
+        " FROM entry WHERE user_id = ? AND on_date BETWEEN ? AND ?", args).fetchone()
+    top = conn.execute(
+        "SELECT name, SUM(amount) AS total FROM entry"
+        " WHERE user_id = ? AND kind = 'exp' AND on_date BETWEEN ? AND ?"
+        " GROUP BY name COLLATE NOCASE ORDER BY total DESC LIMIT 3", args).fetchall()
+    return {"spent": row["spent"], "earned": row["earned"],
+            "net": row["earned"] - row["spent"], "count": row["count"], "top": top}
+
+
+def day_report(conn, user_id: int, on_date) -> dict:
+    entries = list_entries(conn, user_id, on_date, on_date)
+    spent = sum(e["amount"] for e in entries if e["kind"] == "exp")
+    earned = sum(e["amount"] for e in entries if e["kind"] == "earn")
+    return {"spent": spent, "earned": earned, "net": earned - spent, "entries": entries}
+
+
+def category_totals(conn, user_id: int, start, end):
+    """Expenses only — an earning has no category to spend from.
+    The uncategorized bucket comes last, with a NULL name."""
+    return conn.execute(
+        "SELECT c.id AS category_id, c.name AS name,"
+        "       SUM(e.amount) AS total, COUNT(*) AS count"
+        " FROM entry e LEFT JOIN category c ON c.id = e.category_id"
+        " WHERE e.user_id = ? AND e.kind = 'exp' AND e.on_date BETWEEN ? AND ?"
+        " GROUP BY e.category_id"
+        " ORDER BY (c.name IS NULL), total DESC",
+        (user_id, _iso(start), _iso(end))).fetchall()

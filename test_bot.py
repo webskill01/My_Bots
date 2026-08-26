@@ -365,3 +365,130 @@ def test_deleting_a_category_keeps_its_entries_and_uncategorizes_them(conn):
 def test_a_category_can_exist_before_it_has_any_entry(conn):
     dbm.create_category(conn, A, "Rent")
     assert [c["name"] for c in dbm.list_categories(conn, A)] == ["Rent"]
+
+
+# --- db: reports ------------------------------------------------------------
+
+D1, D2, D3 = dt.date(2026, 8, 24), dt.date(2026, 8, 25), dt.date(2026, 8, 26)
+
+
+@pytest.fixture
+def ledger(conn):
+    """Two tenants with overlapping dates. B's numbers are absurd on purpose:
+    if one leaks into A's totals it is unmissable."""
+    food = dbm.create_category(conn, A, "Food")
+    travel = dbm.create_category(conn, A, "Travel")
+    for kind, amount, name, cat, on in [
+        ("exp",   10000, "chai",      food,   D1),
+        ("exp",   20000, "auto",      travel, D1),
+        ("earn", 500000, "salary",    None,   D1),
+        ("exp",   30000, "lunch",     food,   D2),
+        ("exp",    5000, "misc",      None,   D2),
+        ("exp",   80000, "rent",      None,   D3),
+        ("exp",   15000, "bus",       travel, D3),
+        ("earn", 100000, "freelance", None,   D3),
+    ]:
+        dbm.add_entry(conn, A, kind, amount, name, cat, on)
+
+    b_food = dbm.create_category(conn, B, "Food")
+    dbm.add_entry(conn, B, "exp", 9999900, "yacht", b_food, D2)
+    dbm.add_entry(conn, B, "earn", 7777700, "lottery", None, D3)
+    return conn
+
+
+def test_summary_totals(ledger):
+    s = dbm.summary(ledger, A, D1, D3)
+    assert s["spent"] == 160000
+    assert s["earned"] == 600000
+    assert s["net"] == 440000
+    assert s["count"] == 8
+
+
+def test_summary_net_is_exact(ledger):
+    s = dbm.summary(ledger, A, D1, D3)
+    assert s["net"] == s["earned"] - s["spent"]
+
+
+def test_summary_top_expenses_are_grouped_by_name(ledger):
+    dbm.add_entry(ledger, A, "exp", 10000, "chai", None, D3)  # second chai
+    top = dbm.summary(ledger, A, D1, D3)["top"]
+    assert [(t["name"], t["total"]) for t in top][:3] == [
+        ("rent", 80000), ("lunch", 30000), ("chai", 20000)]
+
+
+def test_summary_respects_the_date_range(ledger):
+    s = dbm.summary(ledger, A, D3, D3)
+    assert s["spent"] == 95000
+    assert s["earned"] == 100000
+
+
+def test_summary_is_scoped_to_the_tenant(ledger):
+    assert dbm.summary(ledger, A, D1, D3)["spent"] == 160000       # no yacht
+    assert dbm.summary(ledger, B, D1, D3)["earned"] == 7777700     # no salary
+
+
+def test_summary_of_an_empty_ledger_is_zeros_not_a_crash(conn):
+    s = dbm.summary(conn, A, D1, D3)
+    assert (s["spent"], s["earned"], s["net"], s["count"], s["top"]) == (0, 0, 0, 0, [])
+
+
+def test_day_report_covers_only_that_day(ledger):
+    d = dbm.day_report(ledger, A, D3)
+    assert d["spent"] == 95000
+    assert d["earned"] == 100000
+    assert d["net"] == 5000
+    assert sorted(e["name"] for e in d["entries"]) == ["bus", "freelance", "rent"]
+
+
+def test_day_report_is_scoped(ledger):
+    assert dbm.day_report(ledger, A, D2)["spent"] == 35000  # not the yacht
+
+
+def test_day_report_of_an_empty_day(ledger):
+    d = dbm.day_report(ledger, A, dt.date(2026, 1, 1))
+    assert (d["spent"], d["earned"], d["net"], d["entries"]) == (0, 0, 0, [])
+
+
+def test_category_totals(ledger):
+    rows = {r["name"]: (r["total"], r["count"]) for r in
+            dbm.category_totals(ledger, A, D1, D3)}
+    assert rows["Food"] == (40000, 2)
+    assert rows["Travel"] == (35000, 2)
+
+
+def test_category_totals_include_an_uncategorized_bucket(ledger):
+    rows = {r["name"]: r["total"] for r in dbm.category_totals(ledger, A, D1, D3)}
+    assert rows[None] == 85000  # misc + rent
+
+
+def test_category_totals_exclude_earnings(ledger):
+    total = sum(r["total"] for r in dbm.category_totals(ledger, A, D1, D3))
+    assert total == dbm.summary(ledger, A, D1, D3)["spent"]
+
+
+def test_category_totals_are_scoped(ledger):
+    rows = {r["name"]: r["total"] for r in dbm.category_totals(ledger, B, D1, D3)}
+    assert rows == {"Food": 9999900}
+
+
+def test_category_totals_of_an_empty_ledger(conn):
+    assert dbm.category_totals(conn, A, D1, D3) == []
+
+
+def test_listing_one_categorys_entries(ledger):
+    food = dbm.find_category(ledger, A, "Food")["id"]
+    rows = dbm.list_entries(ledger, A, D1, D3, category_id=food)
+    assert sorted(r["name"] for r in rows) == ["chai", "lunch"]
+
+
+def test_listing_uncategorized_entries(ledger):
+    rows = dbm.list_entries(ledger, A, D1, D3, category_id=None, kind="exp")
+    assert sorted(r["name"] for r in rows) == ["misc", "rent"]
+
+
+def test_paging_entries(ledger):
+    page1 = dbm.list_entries(ledger, A, D1, D3, limit=3, offset=0)
+    page2 = dbm.list_entries(ledger, A, D1, D3, limit=3, offset=3)
+    assert len(page1) == len(page2) == 3
+    assert not {r["id"] for r in page1} & {r["id"] for r in page2}
+    assert dbm.count_entries(ledger, A, D1, D3) == 8
