@@ -598,7 +598,7 @@ def test_cat_view_lists_only_that_categorys_expenses(ledger, user):
 def test_cat_view_uncategorized_bucket(ledger, user):
     text, _ = botm.cat_view(ledger, user, Ctx(), 0, 0)
     assert "misc" in text and "rent" in text
-    assert "salary" not in text    # earnings are not spending
+    assert "+₹5,000" in text       # salary: earnings sit beside spending, signed
 
 
 def test_cat_view_of_a_deleted_category(ledger, user):
@@ -764,3 +764,74 @@ def test_filed_time_is_shown_in_the_users_timezone(ledger, user):
 def test_filed_time_handles_a_naive_legacy_timestamp(ledger, user):
     naive = botm._local("2026-08-26T16:11:25", user)
     assert naive.hour == 21 and naive.minute == 41    # 16:11 UTC is 21:41 IST
+
+
+# --- back buttons and earnings by category ---------------------------------
+
+def _back(kb):
+    return next(b.callback_data for b in _all_buttons(kb) if "Back" in b.text)
+
+
+def test_summary_back_goes_to_the_menu_not_itself(ledger, user):
+    _, kb = botm.summary_view(ledger, user, Ctx())
+    assert _back(kb) == "menu"
+
+
+def test_empty_entries_back_goes_to_the_menu(conn):
+    _, kb = botm.entries_view(conn, dbm.get_or_create_user(conn, A), Ctx(), 0)
+    assert _back(kb) == "menu"
+
+
+def test_period_picker_back_returns_to_its_view():
+    assert _back(botm.period_kb("cat")) == "cat"
+
+
+@pytest.fixture
+def gigs(ledger):
+    sofi = dbm.create_category(ledger, A, "sofi")
+    taxi = dbm.create_category(ledger, A, "taxi")
+    for amount, cat in [(300000, sofi), (200000, sofi), (150000, taxi)]:
+        dbm.add_entry(ledger, A, "earn", amount, "payout", cat, D2)
+    dbm.add_entry(ledger, A, "exp", 40000, "fuel", taxi, D2)
+    return ledger, sofi, taxi
+
+
+def test_earning_totals_per_category(gigs):
+    conn, sofi, taxi = gigs
+    rows = {r["category_id"]: r["total"]
+            for r in dbm.category_totals(conn, A, D1, D3, kind="earn")}
+    assert rows == {sofi: 500000, taxi: 150000, None: 600000}
+
+
+def test_summary_lists_earnings_by_category(gigs, user):
+    text, _ = botm.summary_view(gigs[0], user, Ctx())
+    assert "sofi   +₹5,000" in text
+    assert "taxi   +₹1,500" in text
+    assert "₹12,500" in text     # total earned: 6,000 + 5,000 + 1,500
+
+
+def test_categories_view_shows_earned_and_spent(gigs, user):
+    text, _ = botm.cats_view(gigs[0], user, Ctx())
+    assert "taxi   +₹1,500 · ₹400  (2)" in text
+    assert "sofi   +₹5,000  (2)" in text
+
+
+def test_category_view_lists_its_earnings_too(gigs, user):
+    conn, _, taxi = gigs
+    text, kb = botm.cat_view(conn, user, Ctx(), taxi, 0)
+    assert "Earned +₹1,500 · Spent ₹400" in text
+    assert len([b for b in _all_buttons(kb) if b.callback_data.startswith("e:")]) == 2
+
+
+def test_every_command_is_registered_and_listed():
+    app = botm.build("123:abc", None)
+    handled = {c for h in app.handlers[0] for c in getattr(h, "commands", ())}
+    assert {name for name, _ in botm.COMMANDS} <= handled
+
+
+def test_entry_back_returns_to_the_list_it_came_from(ledger, user):
+    entry_id = dbm.list_entries(ledger, A, D1, D3)[0]["id"]
+    _, kb = botm.entry_view(ledger, user, entry_id, back="cat:3:1")
+    assert _back(kb) == "cat:3:1"
+    _, kb = botm.entry_view(ledger, user, entry_id)
+    assert _back(kb) == "ent:0"

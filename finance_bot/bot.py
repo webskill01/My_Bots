@@ -35,8 +35,12 @@ WELCOME = (
     "Dates take <code>today</code>, <code>yesterday</code>, <code>3d</code>, "
     "<code>24/8</code>, <code>24 aug</code> or <code>aug 24</code>, so you can "
     "always fill in a day you missed.\n\n"
-    "/menu for summaries, editing and categories."
+    "/summary, /day, /entries, /categories, /earn, /settings — "
+    "or /menu for all of it as buttons."
 )
+
+EARN_PROMPT = ("Send the earning — amount then name, e.g. 3000 freelance #sofi. "
+               "Add a date if it's for an earlier day.")
 
 
 def _e(s) -> str:
@@ -99,22 +103,24 @@ def menu_kb() -> Kb:
     ])
 
 
-def period_kb(back: str) -> Kb:
-    """One picker, reused by Summary, Entries and Categories."""
+def period_kb(view: str, back: str | None = None) -> Kb:
+    """One picker, reused by Summary, Entries and Categories. `view` is what a
+    period tap redraws; `back` is where ← goes, when that isn't the view itself."""
     rows, pair = [], []
     for key, label in PERIODS:
-        pair.append(Btn(label, callback_data=f"per:{key}:{back}"))
+        pair.append(Btn(label, callback_data=f"per:{key}:{view}"))
         if len(pair) == 2:
             rows.append(pair)
             pair = []
     if pair:
         rows.append(pair)
-    rows.append([Btn("← Back", callback_data=back)])
+    rows.append([Btn("← Back", callback_data=back or view)])
     return Kb(rows)
 
 
-def entry_kb(entry_id: int, fresh: bool = False) -> Kb:
-    """The edit controls. `fresh` adds Undo, for a just-added entry."""
+def entry_kb(entry_id: int, fresh: bool = False, back: str = "ent:0") -> Kb:
+    """The edit controls. `fresh` adds Undo, for a just-added entry.
+    `back` is the list the entry was opened from."""
     rows = [
         [Btn("✏️ Amount", callback_data=f"e:{entry_id}:amt"),
          Btn("📝 Name", callback_data=f"e:{entry_id}:name")],
@@ -125,7 +131,7 @@ def entry_kb(entry_id: int, fresh: bool = False) -> Kb:
         rows.append([Btn("✕ Undo", callback_data=f"e:{entry_id}:undo")])
     else:
         rows.append([Btn("🗑 Delete", callback_data=f"e:{entry_id}:del"),
-                     Btn("← Back", callback_data="ent:0")])
+                     Btn("← Back", callback_data=back)])
     return Kb(rows)
 
 
@@ -147,10 +153,16 @@ def summary_view(conn, user, context) -> tuple[str, Kb]:
         lines.append(f"Budget   {_money(user['budget'], user)} · "
                      f"{_money(abs(left), user)} {'left' if left >= 0 else 'over'}")
 
+    lines.append("─────────────")
+    earned_by = db.category_totals(conn, user["user_id"], start, end, kind="earn")
+    if earned_by:
+        lines.append("<b>Earned by category</b>")
+        lines += [f"  {_e(t['name']) if t['name'] else '<i>Uncategorized</i>'}   "
+                  f"+{_money(t['total'], user)}  ({t['count']})" for t in earned_by]
     if s["top"]:
         top = " · ".join(f"{_e(t['name']) or '—'} {_money(t['total'], user)}"
                          for t in s["top"])
-        lines += ["─────────────", f"Top: {top}"]
+        lines.append(f"Top spends: {top}")
     if not s["count"]:
         lines += ["", "Nothing recorded in this period yet."]
     elif start > dt.date.min:
@@ -160,7 +172,7 @@ def summary_view(conn, user, context) -> tuple[str, Kb]:
     else:
         lines.append(f"{s['count']} entries")  # "all time" has no meaningful daily avg
 
-    return "\n".join(lines), period_kb("sum")
+    return "\n".join(lines), period_kb("sum", back="menu")
 
 
 def day_view(conn, user, day: dt.date) -> tuple[str, Kb]:
@@ -196,7 +208,7 @@ def entries_view(conn, user, context, page: int) -> tuple[str, Kb]:
 
     head = f"📝 <b>Entries</b> · {_period_name(context)} · {total} total"
     if not rows:
-        return head + "\n\nNothing here yet.", period_kb("ent:0")
+        return head + "\n\nNothing here yet.", period_kb("ent:0", back="menu")
 
     lines = [head, f"Page {page + 1} of {(total + PAGE - 1) // PAGE}", ""]
     buttons = []
@@ -220,7 +232,7 @@ def entries_view(conn, user, context, page: int) -> tuple[str, Kb]:
     return "\n".join(lines), Kb(buttons)
 
 
-def entry_view(conn, user, entry_id: int) -> tuple[str, Kb] | None:
+def entry_view(conn, user, entry_id: int, back: str = "ent:0") -> tuple[str, Kb] | None:
     row = db.get_entry(conn, user["user_id"], entry_id)
     if row is None:
         return None
@@ -231,29 +243,39 @@ def entry_view(conn, user, entry_id: int) -> tuple[str, Kb] | None:
              f"Category: {_e(row['category_name']) if row['category_name'] else '—'}",
              f"Date: {_date(row['on_date']).strftime('%a, %d %b %Y')}",
              f"<i>filed {filed}</i>"]
-    return "\n".join(lines), entry_kb(entry_id)
+    return "\n".join(lines), entry_kb(entry_id, back=back)
 
 
 def cats_view(conn, user, context) -> tuple[str, Kb]:
     uid = user["user_id"]
     start, end = _range(context, db.user_today(user))
-    totals = db.category_totals(conn, uid, start, end)
-    named = {t["category_id"]: t for t in totals if t["category_id"]}
+    spent = {t["category_id"]: t for t in db.category_totals(conn, uid, start, end)}
+    earned = {t["category_id"]: t for t in
+              db.category_totals(conn, uid, start, end, kind="earn")}
+
+    def _amounts(cat_id) -> str:
+        """'₹500', '+₹3,000' or '+₹3,000 · ₹500' — only the sides that exist."""
+        parts = []
+        if cat_id in earned:
+            parts.append("+" + _money(earned[cat_id]["total"], user))
+        if cat_id in spent or not parts:
+            parts.append(_money(spent[cat_id]["total"] if cat_id in spent else 0, user))
+        return " · ".join(parts)
+
+    def _count(cat_id) -> int:
+        return sum(t[cat_id]["count"] for t in (spent, earned) if cat_id in t)
 
     lines = [f"📂 <b>Categories</b> · {_period_name(context)}", ""]
     buttons = []
     for cat in db.list_categories(conn, uid):
-        t = named.get(cat["id"])
-        spent = _money(t["total"], user) if t else _money(0, user)
-        count = t["count"] if t else 0
-        lines.append(f"  {_e(cat['name'])}   {spent}  ({count})")
-        buttons.append([Btn(f"{cat['name']} · {spent}", callback_data=f"cat:{cat['id']}:0")])
+        amounts = _amounts(cat["id"])
+        lines.append(f"  {_e(cat['name'])}   {amounts}  ({_count(cat['id'])})")
+        buttons.append([Btn(f"{cat['name']} · {amounts}", callback_data=f"cat:{cat['id']}:0")])
 
-    unc = next((t for t in totals if t["category_id"] is None), None)
-    if unc:
-        lines.append(f"  <i>Uncategorized</i>   {_money(unc['total'], user)}  ({unc['count']})")
-        buttons.append([Btn(f"Uncategorized · {_money(unc['total'], user)}",
-                            callback_data="cat:0:0")])
+    if None in spent or None in earned:
+        amounts = _amounts(None)
+        lines.append(f"  <i>Uncategorized</i>   {amounts}  ({_count(None)})")
+        buttons.append([Btn(f"Uncategorized · {amounts}", callback_data="cat:0:0")])
     if len(lines) == 2:
         lines.append("  No categories yet. Add one, or tag an entry with #food.")
 
@@ -274,17 +296,21 @@ def cat_view(conn, user, context, cat_id: int, page: int) -> tuple[str, Kb]:
 
     total = db.count_entries(conn, uid, start, end, category_id=key)
     rows = db.list_entries(conn, uid, start, end, limit=PAGE, offset=page * PAGE,
-                           category_id=key, kind="exp")
-    spent = sum(r["amount"] for r in
-                db.list_entries(conn, uid, start, end, category_id=key, kind="exp"))
+                           category_id=key)
+    everything = db.list_entries(conn, uid, start, end, category_id=key)
+    spent = sum(r["amount"] for r in everything if r["kind"] == "exp")
+    earned = sum(r["amount"] for r in everything if r["kind"] == "earn")
 
-    lines = [f"📂 <b>{_e(name)}</b> · {_money(spent, user)} · {_period_name(context)}", ""]
+    totals = " · ".join(
+        ([f"Earned +{_money(earned, user)}"] if earned else []) +
+        ([f"Spent {_money(spent, user)}"] if spent or not earned else []))
+    lines = [f"📂 <b>{_e(name)}</b> · {_period_name(context)}", totals, ""]
     buttons = []
     for row in rows:
         lines.append(f"  {_fmt_date(_date(row['on_date']))}  {_e(row['name']) or '—'}"
-                     f"   {_money(row['amount'], user)}")
+                     f"   {_signed(row, user)}")
         buttons.append([Btn(f"{_fmt_date(_date(row['on_date']))} · "
-                            f"{row['name'] or '—'} · {_money(row['amount'], user)}",
+                            f"{row['name'] or '—'} · {_signed(row, user)}",
                             callback_data=f"e:{row['id']}")])
     if not rows:
         lines.append("  Nothing in this period.")
@@ -407,10 +433,53 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                                     reply_markup=menu_kb())
 
 
+async def _reply(update: Update, view) -> None:
+    text, kb = view
+    await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
 async def cmd_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn, user = _who(update, context)
-    text, kb = day_view(conn, user, db.user_today(user))
-    await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+    await _reply(update, day_view(conn, user, db.user_today(user)))
+
+
+async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn, user = _who(update, context)
+    await _reply(update, summary_view(conn, user, context))
+
+
+async def cmd_entries(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn, user = _who(update, context)
+    context.user_data["entry_back"] = "ent:0"
+    await _reply(update, entries_view(conn, user, context, 0))
+
+
+async def cmd_categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn, user = _who(update, context)
+    await _reply(update, cats_view(conn, user, context))
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn, user = _who(update, context)
+    await _reply(update, settings_view(conn, user))
+
+
+async def cmd_earn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _who(update, context)
+    context.user_data["pending"] = {"what": "earn"}
+    await update.message.reply_text(EARN_PROMPT)
+
+
+# What shows up when you type "/". Order is the order Telegram lists them.
+COMMANDS = [
+    ("summary", "📊 Earned, spent and net for a period"),
+    ("day", "📅 Today's entries"),
+    ("entries", "📝 Every entry — tap to edit or delete"),
+    ("categories", "📂 Totals per category"),
+    ("earn", "💰 Add an earning"),
+    ("settings", "⚙️ Timezone, currency, budget"),
+    ("menu", "Everything, as buttons"),
+]
 
 
 # --- text: either an answer to a prompt, or a new entry ---------------------
@@ -459,12 +528,12 @@ async def _handle_pending(update, context, conn, user, pending, text) -> bool:
             await reply("That isn't an amount. Try 250 or 250.50.")
             return True
         db.update_entry(conn, uid, pending["entry_id"], amount=amount)
-        await _reshow(update, conn, user, pending["entry_id"])
+        await _reshow(update, context, conn, user, pending["entry_id"])
         return True
 
     if what == "name":
         db.update_entry(conn, uid, pending["entry_id"], name=text[:100])
-        await _reshow(update, conn, user, pending["entry_id"])
+        await _reshow(update, context, conn, user, pending["entry_id"])
         return True
 
     if what == "date":
@@ -474,7 +543,7 @@ async def _handle_pending(update, context, conn, user, pending, text) -> bool:
             await reply("I can't read that date. Try 24 aug, 24/8, or yesterday.")
             return True
         db.update_entry(conn, uid, pending["entry_id"], on_date=day)
-        await _reshow(update, conn, user, pending["entry_id"])
+        await _reshow(update, context, conn, user, pending["entry_id"])
         return True
 
     if what == "dayjump":
@@ -498,7 +567,7 @@ async def _handle_pending(update, context, conn, user, pending, text) -> bool:
             return True
         if what == "newcat_for":
             db.update_entry(conn, uid, pending["entry_id"], category_id=cat_id)
-            await _reshow(update, conn, user, pending["entry_id"])
+            await _reshow(update, context, conn, user, pending["entry_id"])
         else:
             body, kb = cats_view(conn, user, context)
             await reply(body, reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -560,8 +629,14 @@ async def _handle_pending(update, context, conn, user, pending, text) -> bool:
     return False
 
 
-async def _reshow(update, conn, user, entry_id: int) -> None:
-    view = entry_view(conn, user, entry_id)
+def _entry_back(context) -> str:
+    """The list an entry was opened from (Entries or one category), so its
+    Back returns there instead of always landing on Entries."""
+    return context.user_data.get("entry_back", "ent:0")
+
+
+async def _reshow(update, context, conn, user, entry_id: int) -> None:
+    view = entry_view(conn, user, entry_id, _entry_back(context))
     if view is None:
         await update.message.reply_text("That entry is gone.")
         return
@@ -614,6 +689,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if rest == "period":
             await _show(q, ("Show entries for:", period_kb("ent:0")))
         else:
+            context.user_data["entry_back"] = data
             await _show(q, entries_view(conn, user, context, int(rest)))
 
     elif head == "e":
@@ -622,7 +698,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     elif head == "ed":
         entry_id, _, iso = rest.partition(":")
         db.update_entry(conn, uid, int(entry_id), on_date=dt.date.fromisoformat(iso))
-        await _show(q, entry_view(conn, user, int(entry_id)) or
+        await _show(q, entry_view(conn, user, int(entry_id), _entry_back(context)) or
                     ("That entry is gone.", menu_kb()))
 
     elif head == "setc":
@@ -632,7 +708,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await q.message.reply_text("Name for the new category?")
             return
         db.update_entry(conn, uid, int(entry_id), category_id=int(cid) or None)
-        await _show(q, entry_view(conn, user, int(entry_id)) or
+        await _show(q, entry_view(conn, user, int(entry_id), _entry_back(context)) or
                     ("That entry is gone.", menu_kb()))
 
     elif head == "cat":
@@ -656,9 +732,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     elif data == "earn":
         context.user_data["pending"] = {"what": "earn"}
-        await q.message.reply_text("Send the earning — amount then name, "
-                                   "e.g. 3000 freelance. Add a date if it's for "
-                                   "an earlier day.")
+        await q.message.reply_text(EARN_PROMPT)
 
 
 async def _entry_action(q, context, conn, user, rest: str) -> None:
@@ -688,9 +762,9 @@ async def _entry_action(q, context, conn, user, rest: str) -> None:
                              Btn("← Cancel", callback_data=f"e:{entry_id}")]])))
     elif action == "delok":
         db.delete_entry(conn, uid, entry_id)
-        await _show(q, ("🗑 Deleted.", Kb([[Btn("← Entries", callback_data="ent:0")]])))
+        await _show(q, ("🗑 Deleted.", Kb([[Btn("← Back", callback_data=_entry_back(context))]])))
     else:
-        await _show(q, entry_view(conn, user, entry_id) or
+        await _show(q, entry_view(conn, user, entry_id, _entry_back(context)) or
                     ("That entry is gone.", menu_kb()))
 
 
@@ -721,6 +795,7 @@ async def _category_action(q, context, conn, user, rest: str) -> None:
         db.delete_category(conn, uid, cat_id)
         await _show(q, cats_view(conn, user, context))
     else:
+        context.user_data["entry_back"] = f"cat:{cat_id}:{int(action or 0)}"
         await _show(q, cat_view(conn, user, context, cat_id, int(action or 0)))
 
 
@@ -734,12 +809,18 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
 
 
+async def _register_commands(app: Application) -> None:
+    await app.bot.set_my_commands(COMMANDS)
+
+
 def build(token: str, conn) -> Application:
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_register_commands).build()
     app.bot_data["conn"] = conn
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("menu", cmd_menu))
-    app.add_handler(CommandHandler("day", cmd_day))
+    for name, handler in [("start", cmd_start), ("menu", cmd_menu), ("day", cmd_day),
+                          ("summary", cmd_summary), ("entries", cmd_entries),
+                          ("categories", cmd_categories), ("earn", cmd_earn),
+                          ("settings", cmd_settings)]:
+        app.add_handler(CommandHandler(name, handler))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)

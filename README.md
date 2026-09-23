@@ -28,16 +28,20 @@ Order is flexible: `250 chai #food 24 aug` works. A `+` means earning, anything
 else is an expense. Dates accept `today`, `yesterday`, `Nd`, `24/8`,
 `24/08/2026`, `24 aug`, `24 august`, and `aug 24`.
 
-## Menu
+## Commands
 
-`/menu` opens everything else:
+Each screen has its own command, and all of them show up when you type `/`.
+`/menu` opens the same screens as buttons.
 
-- **📊 Summary** — earned, spent, net for a period
-- **📅 Day** — one day's total and its full entry list
-- **📝 Entries** — every entry, paged, tap to edit or delete
-- **📂 Categories** — totals per category, tap for that category's full list
-- **💰 Add earning** — guided path if you'd rather tap than type
-- **⚙️ Settings** — timezone, currency and monthly budget
+- **/summary** — earned, spent, net for a period, plus earnings per category
+- **/day** — one day's total and its full entry list
+- **/entries** — every entry, paged, tap to edit or delete
+- **/categories** — earned and spent per category, tap for that category's list
+- **/earn** — guided path if you'd rather tap than type
+- **/settings** — timezone, currency and monthly budget
+
+Tag earnings to split income by source: `+3000 payout #sofi`,
+`+1500 driver-bot #taxi`. /summary and /categories then show each one's total.
 
 ## Monthly budget
 

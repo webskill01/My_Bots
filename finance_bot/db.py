@@ -153,12 +153,16 @@ def list_entries(conn, user_id: int, start, end, limit: int | None = None,
     return conn.execute(sql, args).fetchall()
 
 
-def count_entries(conn, user_id: int, start, end, category_id=ANY_CATEGORY) -> int:
+def count_entries(conn, user_id: int, start, end, category_id=ANY_CATEGORY,
+                  kind: str | None = None) -> int:
     sql = "SELECT COUNT(*) FROM entry WHERE user_id = ? AND on_date BETWEEN ? AND ?"
     args = [user_id, _iso(start), _iso(end)]
     if category_id is not ANY_CATEGORY:
         sql += " AND category_id IS ?"
         args.append(category_id)
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
     return conn.execute(sql, args).fetchone()[0]
 
 
@@ -233,17 +237,17 @@ def day_report(conn, user_id: int, on_date) -> dict:
     return {"spent": spent, "earned": earned, "net": earned - spent, "entries": entries}
 
 
-def category_totals(conn, user_id: int, start, end):
-    """Expenses only — an earning has no category to spend from.
-    The uncategorized bucket comes last, with a NULL name."""
+def category_totals(conn, user_id: int, start, end, kind: str = "exp"):
+    """One kind at a time, so spending and earning never net off each other
+    inside a category. The uncategorized bucket comes last, with a NULL name."""
     return conn.execute(
         "SELECT c.id AS category_id, c.name AS name,"
         "       SUM(e.amount) AS total, COUNT(*) AS count"
         " FROM entry e LEFT JOIN category c ON c.id = e.category_id"
-        " WHERE e.user_id = ? AND e.kind = 'exp' AND e.on_date BETWEEN ? AND ?"
+        " WHERE e.user_id = ? AND e.kind = ? AND e.on_date BETWEEN ? AND ?"
         " GROUP BY e.category_id"
         " ORDER BY (c.name IS NULL), total DESC",
-        (user_id, _iso(start), _iso(end))).fetchall()
+        (user_id, kind, _iso(start), _iso(end))).fetchall()
 
 
 def record_alert(conn, user_id: int, month: str, level: int) -> None:
