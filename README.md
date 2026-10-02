@@ -69,7 +69,13 @@ notifications (Web Push) at each task's time. Lives at
 https://schedule.easebuilds.in. Run with `python -m schedule_bot`; it serves
 on `127.0.0.1:SCHEDULE_PORT` (8096) behind nginx.
 
-Set `SCHEDULE_PIN` (6+ digits) in `.env`. Push needs HTTPS (or localhost).
+Set `SCHEDULE_PIN` (6+ characters) in `.env`. Push needs HTTPS (or localhost).
+
+**Accounts:** the admin logs in as `admin` with `SCHEDULE_PIN`. Everyone else
+joins through an invite link the admin makes in Settings → People (one use,
+7 days), picking their own name and password. Each person has a private
+schedule, and reminders go only to their own phones. The admin sees who has
+joined and can disable an account, but never sees anyone's tasks.
 
 **Screens:** Today (Now / Next, main goal, tick-off list), Week (Mon–Sun like
 the Creator OS sheet), Upcoming (one-time tasks by date, filter by tag),

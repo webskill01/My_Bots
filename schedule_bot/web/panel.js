@@ -125,12 +125,48 @@ function wireRows() {
 // ---- shell ----
 $('.top .tabs').innerHTML = TABS.map(([k, l]) => `<a href="#${k}" data-tab="${k}">${l}</a>`).join('');
 $('.bottom').innerHTML = TABS.map(([k, l]) => `<a href="#${k}" data-tab="${k}">${svg(k)}${l}</a>`).join('');
-function showLogin() { $('#app').hidden = true; $('#login').hidden = false; $('#pw').focus(); }
+function showLogin() {
+  $('#app').hidden = true; $('#joinSec').hidden = true; $('#login').hidden = false;
+  try { $('#un').value = $('#un').value || localStorage.getItem('schedName') || ''; } catch (e) {}
+  ($('#un').value ? $('#pw') : $('#un')).focus();
+}
 $('#loginForm').onsubmit = async e => {
   e.preventDefault();
   $('#loginErr').hidden = true;
-  try { await api('/api/login', { pin: $('#pw').value }); $('#pw').value = ''; $('#login').hidden = true; refresh(true); }
-  catch (err) { $('#loginErr').textContent = err.message; $('#loginErr').hidden = false; }
+  try {
+    await api('/api/login', { name: $('#un').value, password: $('#pw').value });
+    try { localStorage.setItem('schedName', $('#un').value.trim()); } catch (e) {}
+    $('#pw').value = ''; $('#login').hidden = true; refresh(true);
+  } catch (err) { $('#loginErr').textContent = err.message; $('#loginErr').hidden = false; }
+};
+
+// ---- joining from an invite link: /join/<token> ----
+const joinToken = (location.pathname.match(/^\/join\/([\w-]{20,64})$/) || [])[1];
+async function startJoin() {
+  $('#login').hidden = true; $('#app').hidden = true; $('#joinSec').hidden = false;
+  try {
+    const inv = await api(`/api/invite/${joinToken}`);
+    $('#joinSub').textContent = inv.label ? `Invite for ${inv.label} · create your account` : 'Create your account';
+    if (inv.label && !$('#jName').value) $('#jName').value = inv.label;
+    $('#jName').focus();
+  } catch (err) {
+    $('#joinForm').innerHTML = `<p class="err" style="margin:0">${esc(err.message)}</p><p class="muted small" style="margin-top:8px">Ask for a new link, or <a href="/">log in</a> if you already have an account.</p>`;
+  }
+}
+$('#joinForm').onsubmit = async e => {
+  e.preventDefault();
+  $('#joinErr').hidden = true;
+  if ($('#jPw').value !== $('#jPw2').value) { $('#joinErr').textContent = 'The two passwords don’t match.'; $('#joinErr').hidden = false; return; }
+  const btn = e.submitter || $('#joinForm button[type=submit]'); btn.disabled = true;
+  try {
+    await api('/api/join', { token: joinToken, name: $('#jName').value, password: $('#jPw').value });
+    try { localStorage.setItem('schedName', $('#jName').value.trim()); } catch (e) {}
+    history.replaceState(null, '', '/#today');
+    $('#joinSec').hidden = true;
+    refresh(true);
+    toast('Welcome! Turn on reminders in Settings.');
+  } catch (err) { $('#joinErr').textContent = err.message; $('#joinErr').hidden = false; }
+  finally { btn.disabled = false; }
 };
 
 const VIEWS = { today: dayView, day: dayView, week: weekView, upcoming: upcomingView, settings: settingsView };
@@ -153,7 +189,10 @@ function render(force) {
   VIEWS[name](...arg);
   if (!force) window.scrollTo(0, y);
 }
-window.addEventListener('hashchange', () => { render(true); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => {
+  if (route()[0] === 'settings') A = null;   // people and invites, fresh each visit
+  render(true); window.scrollTo(0, 0);
+});
 
 async function refresh(force) {
   clearTimeout(refresh.t);
@@ -328,7 +367,20 @@ function settingsView() {
       <p class="muted small">Reminders go out on this clock.</p>
       <form id="tzForm" class="inrow" style="margin-top:10px"><select id="tz">${tzs.map(z => `<option ${z === S.tz ? 'selected' : ''}>${esc(z)}</option>`).join('')}</select><button class="b primary" type="submit">Save</button></form>
     </div>
-    <div class="card"><div class="srow"><div class="tx"><b>Session</b><span>Stays logged in on this device</span></div><button class="b warn" id="logout">Log out</button></div></div>`;
+    ${S.me.admin ? peopleCard() : ''}
+    <div class="card">
+      <h2>Account</h2>
+      <div class="srow"><div class="tx"><b>${esc(S.me.name)}</b><span>${S.me.admin ? 'Admin · password is the panel PIN' : 'Stays logged in on this device'}</span></div><button class="b warn" id="logout">Log out</button></div>
+      ${S.me.admin ? '' : `<form id="pwForm" style="border-top:1px solid var(--line);padding-top:4px">
+        <label for="pwCur">Current password</label><input id="pwCur" type="password" autocomplete="current-password" required>
+        <label for="pwNew">New password</label><input id="pwNew" type="password" autocomplete="new-password" minlength="6" required>
+        <div class="acts"><button class="b line" type="submit">Change password</button></div></form>`}
+    </div>`;
+  if (S.me.admin) wirePeople();
+  $('#pwForm') && ($('#pwForm').onsubmit = e => {
+    e.preventDefault();
+    busy(e.submitter, async () => { await api('/api/password', { current: $('#pwCur').value, new: $('#pwNew').value }); $('#pwForm').reset(); toast('Password changed'); });
+  });
 
   $('#pushOn') && ($('#pushOn').onclick = e => busy(e.currentTarget, enablePush));
   $('#pushOff') && ($('#pushOff').onclick = e => busy(e.currentTarget, disablePush));
@@ -345,7 +397,72 @@ function settingsView() {
     await api(`/api/tag/${g.id}/delete`, {}); await refresh(true);
   }));
   $('#tzForm').onsubmit = e => { e.preventDefault(); busy(e.submitter, async () => { await api('/api/settings', { tz: $('#tz').value }); toast('Timezone saved'); await refresh(true); }); };
-  $('#logout').onclick = async () => { await api('/api/logout', {}).catch(() => {}); S = null; showLogin(); };
+  $('#logout').onclick = e => busy(e.currentTarget, async () => {
+    if (!await ask('Log out?', 'This device stops getting your reminders until you log in and turn them on again.', 'Log out')) return;
+    // the next person on this phone mustn't get my reminders
+    try {
+      const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+      if (sub) { await api('/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
+    } catch (err) { /* no push here */ }
+    await api('/api/logout', {}).catch(() => {});
+    S = null; A = null; pushOn = false; synced = false; lastJson = '';
+    showLogin();
+  });
+}
+
+// ---- People (admin only): invites and accounts ----
+let A = null;            // /api/admin
+let freshLink = '';      // the invite just made, shown until the next one
+const absLink = p => location.origin + p;
+const ago = iso => { const d = Math.round((Date.now() - Date.parse(iso)) / 864e5); return d <= 0 ? 'today' : d === 1 ? 'yesterday' : `${d} days ago`; };
+async function loadAdmin() {
+  try { A = await api('/api/admin'); } catch (e) { if (e.status === 401) return showLogin(); toast(e.message, true); return; }
+  if (route()[0] === 'settings') render(true);
+}
+function peopleCard() {
+  if (!A) { loadAdmin(); return '<div class="card"><h2>People</h2><p class="muted small">Loading…</p></div>'; }
+  const pending = A.invites.filter(i => !i.joined && !i.expired);
+  return `<div class="card">
+    <h2>People</h2>
+    <p class="muted small">Each person gets a private schedule and their own reminders. You see who’s here, never their tasks.</p>
+    <form id="invForm" class="inrow" style="margin-top:10px"><input id="invLabel" maxlength="40" placeholder="Who is it for? (optional)" autocomplete="off"><button class="b primary" type="submit">Invite</button></form>
+    ${freshLink ? `<div class="link"><code>${esc(freshLink)}</code><button class="b sm line" data-copy="${esc(freshLink)}">Copy</button>${navigator.share ? `<button class="b sm line" data-share="${esc(freshLink)}">Share</button>` : ''}</div>
+      <p class="hint">Works once, for ${7} days. Send it on WhatsApp or anywhere.</p>` : ''}
+    ${A.people.map(p => `<div class="srow"><div class="tx"><b>${esc(p.name)} ${p.is_admin ? '<span class="pill admin">admin</span>' : ''}${p.disabled ? '<span class="pill off">disabled</span>' : ''}</b>
+        <span>${p.tasks} tasks · ${p.devices ? `${p.devices} device${p.devices > 1 ? 's' : ''} with reminders` : 'reminders off'} · joined ${ago(p.created_at)}</span></div>
+        ${p.is_admin ? '' : `<button class="b sm ${p.disabled ? 'line' : 'warn'}" data-user="${p.user_id}" data-off="${p.disabled ? 0 : 1}">${p.disabled ? 'Enable' : 'Disable'}</button>`}</div>`).join('')}
+    ${pending.length ? `<h2 style="margin-top:16px">Unused invites</h2>${pending.map(i => `<div class="srow"><div class="tx"><b>${esc(i.label || 'No name')}</b><span>made ${ago(i.created_at)} · expires in ${Math.max(0, Math.ceil((Date.parse(i.expires_at) - Date.now()) / 864e5))} days</span></div>
+        <div class="acts" style="margin:0"><button class="b sm line" data-copy="${esc(absLink('/join/' + i.token))}">Copy</button><button class="b sm warn" data-revoke="${esc(i.token)}">Revoke</button></div></div>`).join('')}` : ''}
+  </div>`;
+}
+function wirePeople() {
+  if (!A) return;
+  $('#invForm').onsubmit = e => {
+    e.preventDefault();
+    busy(e.submitter, async () => {
+      const { path } = await api('/api/admin/invite', { label: $('#invLabel').value });
+      freshLink = absLink(path);
+      await copy(freshLink, 'Invite link made and copied');
+      await loadAdmin();
+    });
+  };
+  $$('[data-copy]').forEach(b => b.onclick = () => copy(b.dataset.copy, 'Link copied'));
+  $$('[data-share]').forEach(b => b.onclick = () => navigator.share({ title: 'Schedule invite', text: 'Your invite to Schedule:', url: b.dataset.share }).catch(() => {}));
+  $$('[data-revoke]').forEach(b => b.onclick = () => busy(b, async () => {
+    if (!await ask('Revoke this invite?', 'The link stops working. You can make a new one any time.', 'Revoke', true)) return;
+    await api(`/api/admin/invite/${b.dataset.revoke}/revoke`, {});
+    if (freshLink.endsWith(b.dataset.revoke)) freshLink = '';
+    await loadAdmin();
+  }));
+  $$('[data-user]').forEach(b => b.onclick = () => busy(b, async () => {
+    const p = A.people.find(x => x.user_id === +b.dataset.user), off = b.dataset.off === '1';
+    if (off && !await ask(`Disable ${p.name}?`, 'They’re logged out everywhere and stop getting reminders. Their tasks are kept; you can enable them again.', 'Disable', true)) return;
+    await api(`/api/admin/user/${p.user_id}/${off ? 'disable' : 'enable'}`, {});
+    await loadAdmin();
+  }));
+}
+async function copy(text, msg) {
+  try { await navigator.clipboard.writeText(text); toast(msg); } catch (e) { toast('Copy failed — long-press the link to copy it', true); }
 }
 
 // ---- push ----
@@ -454,6 +571,6 @@ $('#fDelete').onclick = () => busy($('#fDelete'), async () => {
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (route()[0] === 'settings') render(true); });
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').then(r => (swReg = r)).catch(() => {});
-  navigator.serviceWorker.addEventListener('message', () => refresh());   // a reminder arrived or was acted on
+  navigator.serviceWorker.addEventListener('message', () => { if (S) refresh(); });   // a reminder arrived or was acted on
 }
-refresh(true);
+if (joinToken) startJoin(); else refresh(true);

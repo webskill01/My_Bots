@@ -47,12 +47,34 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- A logged-in browser. Only the token's hash is stored: a leaked database
+-- doesn't hand out live logins.
+CREATE TABLE IF NOT EXISTS session (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES user(user_id),
+    created_at TEXT NOT NULL
+);
+
+-- One-time join links the admin hands out.
+CREATE TABLE IF NOT EXISTS invite (
+    token      TEXT PRIMARY KEY,
+    label      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,          -- UTC ISO
+    used_by    INTEGER REFERENCES user(user_id)
+);
 """
 
 # Columns added after the first release, applied to old and new databases alike.
 # ponytail: add-column only. Enough until something needs a real migration tool.
 _LATER_COLUMNS = [
     ("task", "days", "INTEGER NOT NULL DEFAULT 127"),   # weekday bits, Mon = 1
+    ("user", "name", "TEXT"),                           # login name; NULL = never logged in
+    ("user", "pw_hash", "TEXT"),                        # NULL for the admin (env PIN)
+    ("user", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
+    ("user", "disabled", "INTEGER NOT NULL DEFAULT 0"),
+    ("push_sub", "user_id", "INTEGER REFERENCES user(user_id)"),  # whose reminders
 ]
 
 EVERY_DAY = 127
@@ -76,6 +98,9 @@ def init(conn: sqlite3.Connection) -> None:
         existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    # ALTER can't add UNIQUE, an index can. Partial: many users have no name yet.
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS user_name ON user(name COLLATE NOCASE)"
+                 " WHERE name IS NOT NULL")
     conn.commit()
 
 
@@ -266,19 +291,149 @@ def delete_tag(conn, user_id: int, tag_id: int) -> bool:
 
 # --- push subscriptions and server secrets ----------------------------------
 
-def save_sub(conn, endpoint: str, keys: str) -> None:
-    conn.execute("INSERT OR REPLACE INTO push_sub (endpoint, keys, created_at) VALUES (?, ?, ?)",
-                 (endpoint, keys, _now()))
+def save_sub(conn, user_id: int, endpoint: str, keys: str) -> None:
+    """A phone belongs to whoever enabled reminders on it last: a shared phone
+    that switches accounts moves over instead of ringing for both."""
+    conn.execute("INSERT OR REPLACE INTO push_sub (endpoint, keys, user_id, created_at)"
+                 " VALUES (?, ?, ?, ?)", (endpoint, keys, user_id, _now()))
     conn.commit()
 
 
-def drop_sub(conn, endpoint: str) -> None:
-    conn.execute("DELETE FROM push_sub WHERE endpoint = ?", (endpoint,))
+def drop_sub(conn, endpoint: str, user_id: int | None = None) -> None:
+    """With user_id, only that user's own device (a logout); without, any (gone)."""
+    if user_id is None:
+        conn.execute("DELETE FROM push_sub WHERE endpoint = ?", (endpoint,))
+    else:
+        conn.execute("DELETE FROM push_sub WHERE endpoint = ? AND user_id = ?", (endpoint, user_id))
     conn.commit()
 
 
-def subs(conn):
-    return conn.execute("SELECT * FROM push_sub").fetchall()
+def subs(conn, user_id: int):
+    return conn.execute("SELECT * FROM push_sub WHERE user_id = ?", (user_id,)).fetchall()
+
+
+def adopt_orphan_subs(conn, user_id: int) -> None:
+    """Subscriptions from before accounts existed belong to the admin."""
+    conn.execute("UPDATE push_sub SET user_id = ? WHERE user_id IS NULL", (user_id,))
+    conn.commit()
+
+
+def task_owner(conn, task_id: int) -> int | None:
+    """Only for notification buttons, which carry a per-task signature instead
+    of a login. Everything else goes through user-scoped queries."""
+    row = conn.execute("SELECT user_id FROM task WHERE id = ?", (task_id,)).fetchone()
+    return row and row["user_id"]
+
+
+# --- accounts, sessions, invites --------------------------------------------
+
+def make_admin(conn, user_id: int, name: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO user (user_id, created_at) VALUES (?, ?)", (user_id, _now()))
+    conn.execute("UPDATE user SET is_admin = 1, name = ?, disabled = 0 WHERE user_id = ?",
+                 (name, user_id))
+    conn.commit()
+
+
+def user_by_name(conn, name: str):
+    return conn.execute("SELECT * FROM user WHERE name = ? COLLATE NOCASE", (name.strip(),)).fetchone()
+
+
+def get_user(conn, user_id: int):
+    return conn.execute("SELECT * FROM user WHERE user_id = ?", (user_id,)).fetchone()
+
+
+def set_password(conn, user_id: int, pw_hash: str) -> None:
+    conn.execute("UPDATE user SET pw_hash = ? WHERE user_id = ?", (pw_hash, user_id))
+    conn.commit()
+
+
+def set_disabled(conn, user_id: int, disabled: bool) -> bool:
+    """The admin can't be disabled: that would lock everyone out of admin."""
+    cur = conn.execute("UPDATE user SET disabled = ? WHERE user_id = ? AND is_admin = 0",
+                       (int(disabled), user_id))
+    if disabled:
+        conn.execute("DELETE FROM session WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM push_sub WHERE user_id = ?", (user_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def people(conn):
+    """Everyone with a login, for the admin's list. Counts only, never tasks."""
+    return conn.execute(
+        "SELECT u.user_id, u.name, u.is_admin, u.disabled, u.created_at,"
+        " (SELECT COUNT(*) FROM task t WHERE t.user_id = u.user_id) AS tasks,"
+        " (SELECT COUNT(*) FROM push_sub p WHERE p.user_id = u.user_id) AS devices"
+        " FROM user u WHERE u.name IS NOT NULL ORDER BY u.is_admin DESC, u.created_at").fetchall()
+
+
+def active_users(conn):
+    return conn.execute("SELECT * FROM user WHERE disabled = 0").fetchall()
+
+
+def add_session(conn, user_id: int, token_hash: str) -> None:
+    conn.execute("INSERT INTO session (token_hash, user_id, created_at) VALUES (?, ?, ?)",
+                 (token_hash, user_id, _now()))
+    conn.commit()
+
+
+def session_user(conn, token_hash: str):
+    return conn.execute(
+        "SELECT u.* FROM session s JOIN user u ON u.user_id = s.user_id"
+        " WHERE s.token_hash = ? AND u.disabled = 0", (token_hash,)).fetchone()
+
+
+def drop_session(conn, token_hash: str) -> None:
+    conn.execute("DELETE FROM session WHERE token_hash = ?", (token_hash,))
+    conn.commit()
+
+
+def add_invite(conn, token: str, label: str, expires_at: str) -> None:
+    conn.execute("INSERT INTO invite (token, label, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                 (token, label, _now(), expires_at))
+    conn.commit()
+
+
+def open_invite(conn, token: str):
+    """The invite, if it can still be used."""
+    return conn.execute("SELECT * FROM invite WHERE token = ? AND used_by IS NULL AND expires_at > ?",
+                        (token, _now())).fetchone()
+
+
+def join(conn, token: str, name: str, pw_hash: str, tz: str = "Asia/Kolkata") -> int | None:
+    """Spend the invite and create the account, all or nothing. None: the
+    invite is gone/used/expired, or the name is taken."""
+    # Write lock first, so two people opening the same link at once can't
+    # both pass the "still unused?" check.
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not conn.execute("SELECT 1 FROM invite WHERE token = ? AND used_by IS NULL"
+                            " AND expires_at > ?", (token, _now())).fetchone():
+            conn.rollback()
+            return None
+        cur = conn.execute("INSERT INTO user (tz, created_at, name, pw_hash) VALUES (?, ?, ?, ?)",
+                           (tz, _now(), name.strip(), pw_hash))
+        conn.execute("UPDATE invite SET used_by = ? WHERE token = ?", (cur.lastrowid, token))
+        conn.commit()
+        return cur.lastrowid
+    except sqlite3.IntegrityError:   # name taken
+        conn.rollback()
+        return None
+
+
+def invites(conn):
+    """Unused ones first; used ones show who joined."""
+    return conn.execute(
+        "SELECT i.*, u.name AS joined_name FROM invite i LEFT JOIN user u ON u.user_id = i.used_by"
+        " ORDER BY i.used_by IS NOT NULL, i.created_at DESC LIMIT 50").fetchall()
+
+
+def delete_invite(conn, token: str) -> bool:
+    """Only an unused invite can be revoked; a used one is the join record."""
+    cur = conn.execute("DELETE FROM invite WHERE token = ? AND used_by IS NULL", (token,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def kv_get(conn, key: str, make=None) -> str | None:

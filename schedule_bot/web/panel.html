@@ -159,6 +159,11 @@
   .srow .tx b { display: block; font-size: 14px; }
   .srow .tx span { font-size: 12.5px; color: var(--muted); }
   .inrow { display: flex; gap: 8px; }
+  .link { display: flex; gap: 6px; align-items: center; margin-top: 10px; padding: 8px 8px 8px 12px; border-radius: 12px; background: var(--ok-soft); }
+  .link code { flex: 1; min-width: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ok); font-weight: 600; }
+  .pill { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 6px; padding: 1px 7px; background: var(--soft); color: var(--muted); }
+  .pill.off { background: var(--bad-soft); color: var(--bad); }
+  .pill.admin { background: var(--accent-soft); color: var(--accent); }
 
   /* floating add */
   .fab { position: fixed; right: 16px; bottom: calc(var(--nav-h) + 22px + env(safe-area-inset-bottom)); z-index: 6; width: 56px; height: 56px; border-radius: 18px; border: 0; background: var(--accent); color: #fff; display: grid; place-items: center; box-shadow: 0 8px 24px rgba(11,110,118,.35); cursor: pointer; }
@@ -195,10 +200,31 @@
     <p class="brand" style="justify-content:center;margin-bottom:6px"><img src="/icon-192.png" alt="">Schedule</p>
     <p class="muted" style="text-align:center;margin-bottom:18px">Routine, tasks and reminders</p>
     <form class="card" id="loginForm">
-      <label for="pw" style="margin-top:0">PIN</label>
-      <input id="pw" type="password" inputmode="numeric" autocomplete="current-password" required style="letter-spacing:.35em;font-size:22px;text-align:center">
+      <label for="un" style="margin-top:0">Name</label>
+      <input id="un" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      <label for="pw">Password</label>
+      <input id="pw" type="password" autocomplete="current-password" required>
       <button class="b primary full" type="submit" style="margin-top:14px">Log in</button>
       <p class="err" id="loginErr" hidden></p>
+    </form>
+    <p class="muted small" style="text-align:center;margin-top:12px">New here? Ask for an invite link.</p>
+  </main>
+</section>
+
+<section id="joinSec" hidden>
+  <main style="max-width:380px;padding-top:10vh">
+    <p class="brand" style="justify-content:center;margin-bottom:6px"><img src="/icon-192.png" alt="">Schedule</p>
+    <p class="muted" style="text-align:center;margin-bottom:18px" id="joinSub">Create your account</p>
+    <form class="card" id="joinForm">
+      <label for="jName" style="margin-top:0">Your name</label>
+      <input id="jName" autocomplete="username" autocapitalize="words" required minlength="2" maxlength="32">
+      <p class="hint">You'll log in with this. Letters, numbers, spaces.</p>
+      <label for="jPw">Password</label>
+      <input id="jPw" type="password" autocomplete="new-password" required minlength="6">
+      <label for="jPw2">Password again</label>
+      <input id="jPw2" type="password" autocomplete="new-password" required minlength="6">
+      <button class="b primary full" type="submit" style="margin-top:14px">Create account</button>
+      <p class="err" id="joinErr" hidden></p>
     </form>
   </main>
 </section>

@@ -252,8 +252,14 @@ def pconn(tmp_path, monkeypatch):
     db.init(c)
     db.get_or_create_user(c, 1)
     monkeypatch.setitem(panel.CFG, "db", path)
-    monkeypatch.setitem(panel.CFG, "uid", 1)
+    monkeypatch.setitem(panel.AUTH, "pin", "123456")
+    monkeypatch.setitem(panel.AUTH, "admin", "admin")
+    panel.setup(c, 1)
     return c
+
+
+def me(c, uid=1):
+    return db.get_user(c, uid)
 
 
 def test_fields_from_a_one_off(pconn):
@@ -302,7 +308,7 @@ def test_turning_a_routine_into_a_one_off_clears_done(pconn):
 # --- panel: actions ---------------------------------------------------------
 
 def test_quick_add_parses_like_the_bot_did(pconn):
-    code, out = panel.act(pconn, "/api/quick", {"text": "gym 7am #daily #health"})
+    code, out = panel.act(pconn, me(pconn), "/api/quick", {"text": "gym 7am #daily #health"})
     assert code == 200
     t = out["task"]
     assert (t["title"], t["daily"], t["days"], t["at_time"], t["tag"]) == ("gym", 1, 127, "07:00", "health")
@@ -310,37 +316,37 @@ def test_quick_add_parses_like_the_bot_did(pconn):
 
 def test_done_toggle_and_snooze(pconn):
     tid = db.add_task(pconn, 1, "call", None, False, "2026-10-05", "09:00")
-    assert panel.act(pconn, f"/api/task/{tid}/done", {"done": True})[1]["task"]["done_on"]
-    assert panel.act(pconn, f"/api/task/{tid}/done", {"done": False})[1]["task"]["done_on"] is None
-    assert panel.act(pconn, f"/api/task/{tid}/snooze", {"minutes": 30})[1]["task"]["snooze_until"]
+    assert panel.act(pconn, me(pconn), f"/api/task/{tid}/done", {"done": True})[1]["task"]["done_on"]
+    assert panel.act(pconn, me(pconn), f"/api/task/{tid}/done", {"done": False})[1]["task"]["done_on"] is None
+    assert panel.act(pconn, me(pconn), f"/api/task/{tid}/snooze", {"minutes": 30})[1]["task"]["snooze_until"]
     with pytest.raises(ValueError):
-        panel.act(pconn, f"/api/task/{tid}/snooze", {"minutes": 7})
+        panel.act(pconn, me(pconn), f"/api/task/{tid}/snooze", {"minutes": 7})
 
 
 def test_someone_elses_task_is_not_found(pconn):
     db.get_or_create_user(pconn, 2)
     tid = db.add_task(pconn, 2, "theirs", None, False, "2026-10-05", None)
-    assert panel.act(pconn, f"/api/task/{tid}/delete", {})[0] == 404
+    assert panel.act(pconn, me(pconn), f"/api/task/{tid}/delete", {})[0] == 404
     assert db.get_task(pconn, 2, tid) is not None
 
 
 def test_notification_buttons_need_the_tasks_signature(pconn):
     tid = db.add_task(pconn, 1, "call", None, False, "2026-10-05", "09:00")
     other = db.add_task(pconn, 1, "other", None, False, "2026-10-05", "09:00")
-    assert panel.act(pconn, "/api/notify", {"id": tid, "sig": panel.sign(pconn, other),
+    assert panel.notify_action(pconn, {"id": tid, "sig": panel.sign(pconn, other),
                                             "action": "done"})[0] == 403
-    assert panel.act(pconn, "/api/notify", {"id": tid, "sig": panel.sign(pconn, tid),
+    assert panel.notify_action(pconn, {"id": tid, "sig": panel.sign(pconn, tid),
                                             "action": "done"})[0] == 200
     assert db.get_task(pconn, 1, tid)["done_on"]
 
 
 def test_subscribe_validates_and_is_idempotent(pconn):
     sub = {"endpoint": "https://fcm.googleapis.com/x", "keys": {"p256dh": "a", "auth": "b"}}
-    panel.act(pconn, "/api/push/subscribe", {"subscription": sub})
-    panel.act(pconn, "/api/push/subscribe", {"subscription": sub})
-    assert len(db.subs(pconn)) == 1
+    panel.act(pconn, me(pconn), "/api/push/subscribe", {"subscription": sub})
+    panel.act(pconn, me(pconn), "/api/push/subscribe", {"subscription": sub})
+    assert len(db.subs(pconn, 1)) == 1
     with pytest.raises(ValueError):
-        panel.act(pconn, "/api/push/subscribe",
+        panel.act(pconn, me(pconn), "/api/push/subscribe",
                   {"subscription": {"endpoint": "http://evil", "keys": sub["keys"]}})
 
 
@@ -350,7 +356,7 @@ def test_state_holds_routine_open_tasks_and_recent_history(pconn):
     db.add_task(pconn, 1, "open old", None, False, today - dt.timedelta(days=200), None)
     old_done = db.add_task(pconn, 1, "done old", None, False, today - dt.timedelta(days=200), None)
     db.update_task(pconn, 1, old_done, done_on=today)
-    s = panel.state(pconn)
+    s = panel.state(pconn, me(pconn))
     assert [t["title"] for t in s["routine"]] == ["gym"]
     assert [t["title"] for t in s["tasks"]] == ["open old"]
     assert len(s["vapid"]) == 87      # base64url of a 65-byte P-256 point
@@ -363,7 +369,7 @@ def test_tick_pushes_due_reminders_once(pconn, monkeypatch):
     past = (now - dt.timedelta(minutes=1)).strftime("%H:%M")
     tid = db.add_task(pconn, 1, "call mom", None, False, now.date() - dt.timedelta(days=1), past)
     sent = []
-    monkeypatch.setattr(panel, "push_all", lambda c, p: sent.append(p) or True)
+    monkeypatch.setattr(panel, "push_all", lambda c, u, p: sent.append(p) or True)
     assert panel.tick(pconn) == 1
     assert panel.tick(pconn) == 0
     assert sent[0]["title"] == "call mom" and sent[0]["sig"] == panel.sign(pconn, tid)
@@ -372,10 +378,10 @@ def test_tick_pushes_due_reminders_once(pconn, monkeypatch):
 def test_tick_retries_when_every_device_failed(pconn, monkeypatch):
     now = db.user_now(db.get_or_create_user(pconn, 1))
     tid = db.add_task(pconn, 1, "call", None, False, now.date() - dt.timedelta(days=1), "09:00")
-    monkeypatch.setattr(panel, "push_all", lambda c, p: False)
+    monkeypatch.setattr(panel, "push_all", lambda c, u, p: False)
     panel.tick(pconn)
     assert db.get_task(pconn, 1, tid)["reminded_on"] is None
-    monkeypatch.setattr(panel, "push_all", lambda c, p: None)   # no devices: don't pile up
+    monkeypatch.setattr(panel, "push_all", lambda c, u, p: None)   # no devices: don't pile up
     panel.tick(pconn)
     assert db.get_task(pconn, 1, tid)["reminded_on"] is not None
 
@@ -389,41 +395,12 @@ def test_push_all_forgets_devices_that_are_gone(pconn, monkeypatch):
     def fake(*a, **kw):
         raise pywebpush.WebPushException("gone", response=Gone())
     monkeypatch.setattr(pywebpush, "webpush", fake)
-    db.save_sub(pconn, "https://push.example/1", json.dumps({"p256dh": "a", "auth": "b"}))
-    assert panel.push_all(pconn, {"title": "x"}) is None
-    assert db.subs(pconn) == []
+    db.save_sub(pconn, 1, "https://push.example/1", json.dumps({"p256dh": "a", "auth": "b"}))
+    assert panel.push_all(pconn, 1, {"title": "x"}) is None
+    assert db.subs(pconn, 1) == []
 
 
 # --- panel: HTTP ------------------------------------------------------------
-
-def test_http_login_gates_the_api(pconn, monkeypatch):
-    monkeypatch.setitem(panel.AUTH, "pin", "123456")
-    monkeypatch.setitem(panel.AUTH, "token", "tok")
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), panel.Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    base = f"http://127.0.0.1:{srv.server_port}"
-
-    def call(path, body=None, cookie=None):
-        headers = {"Content-Type": "application/json", **({"Cookie": cookie} if cookie else {})}
-        req = urllib.request.Request(base + path, headers=headers,
-                                     data=None if body is None else json.dumps(body).encode())
-        try:
-            with urllib.request.urlopen(req) as r:
-                return r.status, r.read(), r.headers
-        except urllib.error.HTTPError as e:
-            return e.code, e.read(), e.headers
-    try:
-        assert call("/")[0] == 200 and call("/sw.js")[0] == 200
-        assert call("/api/state")[0] == 401
-        assert call("/api/quick", {"text": "x"})[0] == 401
-        code, _, headers = call("/api/login", {"pin": "123456"})
-        assert code == 200 and "s=tok" in headers["Set-Cookie"]
-        code, body, _ = call("/api/state", cookie="s=tok")
-        assert code == 200 and "routine" in json.loads(body)
-        assert call("/api/task", {"title": ""}, cookie="s=tok")[0] == 400
-    finally:
-        srv.shutdown()
-
 
 def test_push_all_sends_a_signed_encrypted_message_the_device_can_read(pconn, monkeypatch):
     """End to end against a fake push service: VAPID header present, body
@@ -452,11 +429,195 @@ def test_push_all_sends_a_signed_encrypted_message_the_device_can_read(pconn, mo
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         point = device_key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-        db.save_sub(pconn, f"http://127.0.0.1:{srv.server_port}/push/1",
+        db.save_sub(pconn, 1, f"http://127.0.0.1:{srv.server_port}/push/1",
                     json.dumps({"p256dh": b64(point), "auth": b64(auth)}))
-        assert panel.push_all(pconn, {"title": "gym", "id": 7}) is True
+        assert panel.push_all(pconn, 1, {"title": "gym", "id": 7}) is True
     finally:
         srv.shutdown()
     assert got["auth"].startswith("vapid t=") and panel.vapid_public(pconn) in got["auth"]
     plain = http_ece.decrypt(got["body"], private_key=device_key, auth_secret=auth, version="aes128gcm")
     assert json.loads(plain) == {"title": "gym", "id": 7}
+
+
+# --- accounts ---------------------------------------------------------------
+
+def _invite(c, days=7):
+    token = "t" * 30 + str(days)
+    exp = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=days)
+    db.add_invite(c, token, "", exp.isoformat(timespec="seconds"))
+    return token
+
+
+def test_password_hashes_check_and_never_store_plaintext():
+    h = panel.hash_pw("secret1")
+    assert "secret1" not in h and panel.check_pw("secret1", h)
+    assert not panel.check_pw("secret2", h) and not panel.check_pw("x", None)
+
+
+def test_admin_logs_in_with_the_pin_by_name_or_blank(pconn):
+    assert panel.check_login(pconn, "admin", "123456")["user_id"] == 1
+    assert panel.check_login(pconn, "ADMIN", "123456")["user_id"] == 1
+    assert panel.check_login(pconn, "", "123456")["user_id"] == 1
+    assert panel.check_login(pconn, "admin", "wrong") is None
+
+
+def test_an_invite_makes_one_account_once(pconn):
+    token = _invite(pconn)
+    uid = db.join(pconn, token, "Ravi", panel.hash_pw("ravi-pw"))
+    assert uid and uid != 1
+    assert panel.check_login(pconn, "ravi", "ravi-pw")["user_id"] == uid   # name is case-blind
+    assert db.join(pconn, token, "Someone", panel.hash_pw("x" * 6)) is None   # spent
+    assert db.open_invite(pconn, token) is None
+
+
+def test_join_refuses_expired_invites_and_taken_names(pconn):
+    assert db.join(pconn, _invite(pconn, days=-1), "Late", panel.hash_pw("x" * 6)) is None
+    db.join(pconn, _invite(pconn, days=3), "Ravi", panel.hash_pw("x" * 6))
+    token = _invite(pconn, days=5)
+    assert db.join(pconn, token, "RAVI", panel.hash_pw("x" * 6)) is None
+    assert db.open_invite(pconn, token) is not None   # a taken name doesn't burn the link
+
+
+def test_users_never_see_each_others_tasks(pconn):
+    other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("x" * 6))
+    mine = db.add_task(pconn, 1, "mine", None, False, "2026-10-05", None)
+    panel.act(pconn, me(pconn, other), "/api/quick", {"text": "theirs 6pm"})
+    s1, s2 = panel.state(pconn, me(pconn)), panel.state(pconn, me(pconn, other))
+    assert [t["title"] for t in s1["tasks"]] == ["mine"]
+    assert [t["title"] for t in s2["tasks"]] == ["theirs"]
+    assert panel.act(pconn, me(pconn, other), f"/api/task/{mine}/delete", {})[0] == 404
+    assert s2["me"] == {"name": "Ravi", "admin": False} and s1["me"]["admin"]
+
+
+def test_reminders_go_only_to_the_owners_devices(pconn, monkeypatch):
+    other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("x" * 6))
+    yesterday = db.user_now(me(pconn)).date() - dt.timedelta(days=1)
+    db.add_task(pconn, 1, "admin call", None, False, yesterday, "09:00")
+    db.add_task(pconn, other, "ravi call", None, False, yesterday, "09:00")
+    sent = []
+    monkeypatch.setattr(panel, "push_all", lambda c, u, p: sent.append((u, p["title"])) or True)
+    assert panel.tick(pconn) == 2
+    assert sorted(sent) == sorted([(1, "admin call"), (other, "ravi call")])
+
+
+def test_a_phone_moves_to_whoever_enabled_reminders_last(pconn):
+    other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("x" * 6))
+    sub = {"endpoint": "https://fcm.googleapis.com/shared", "keys": {"p256dh": "a", "auth": "b"}}
+    panel.act(pconn, me(pconn), "/api/push/subscribe", {"subscription": sub})
+    panel.act(pconn, me(pconn, other), "/api/push/subscribe", {"subscription": sub})
+    assert db.subs(pconn, 1) == [] and len(db.subs(pconn, other)) == 1
+    panel.act(pconn, me(pconn), "/api/push/unsubscribe", {"endpoint": sub["endpoint"]})
+    assert len(db.subs(pconn, other)) == 1   # can't unsubscribe someone else's phone
+
+
+def test_orphan_subscriptions_from_before_accounts_go_to_the_admin(tmp_path, monkeypatch):
+    c = db.connect(str(tmp_path / "old.db"))
+    c.executescript(db.SCHEMA.split("-- A logged-in browser")[0])   # the pre-accounts schema
+    c.execute("INSERT INTO user (user_id, created_at) VALUES (42, '2026-10-01')")
+    c.execute("INSERT INTO push_sub (endpoint, keys, created_at) VALUES ('https://x/1', '{}', 'now')")
+    c.commit()
+    db.init(c)
+    monkeypatch.setitem(panel.AUTH, "admin", "admin")
+    panel.setup(c)
+    assert panel.CFG["admin_uid"] == 42 and len(db.subs(c, 42)) == 1
+    assert db.get_user(c, 42)["is_admin"] == 1
+
+
+def test_admin_endpoints_are_admin_only(pconn):
+    other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("x" * 6))
+    assert panel.act(pconn, me(pconn, other), "/api/admin/invite", {})[0] == 403
+    code, out = panel.act(pconn, me(pconn), "/api/admin/invite", {"label": "Priya"})
+    assert code == 200 and out["path"].startswith("/join/")
+    token = out["path"].split("/")[-1]
+    assert db.open_invite(pconn, token)["label"] == "Priya"
+    panel.act(pconn, me(pconn), f"/api/admin/invite/{token}/revoke", {})
+    assert db.open_invite(pconn, token) is None
+
+
+def test_disabling_logs_out_and_silences_but_keeps_tasks(pconn):
+    other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("x" * 6))
+    db.add_task(pconn, other, "theirs", None, False, "2026-10-05", None)
+    token = panel.new_session(pconn, other)
+    db.save_sub(pconn, other, "https://push.example/r", "{}")
+    panel.act(pconn, me(pconn), f"/api/admin/user/{other}/disable", {})
+    assert db.session_user(pconn, panel._token_hash(token)) is None
+    assert db.subs(pconn, other) == [] and panel.check_login(pconn, "Ravi", "x" * 6) is None
+    assert [u["user_id"] for u in db.active_users(pconn)] == [1]
+    assert db.get_task(pconn, other, 1) or db.one_offs(pconn, other, "2000-01-01")
+    with pytest.raises(ValueError):   # the admin can't lock themselves out
+        panel.act(pconn, me(pconn), "/api/admin/user/1/disable", {})
+
+
+def test_changing_password_needs_the_current_one(pconn):
+    other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("old-pw"))
+    with pytest.raises(ValueError):
+        panel.act(pconn, me(pconn, other), "/api/password", {"current": "nope", "new": "new-pw"})
+    panel.act(pconn, me(pconn, other), "/api/password", {"current": "old-pw", "new": "new-pw"})
+    assert panel.check_login(pconn, "Ravi", "new-pw")
+
+
+def test_notification_buttons_act_for_the_tasks_owner(pconn):
+    other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("x" * 6))
+    tid = db.add_task(pconn, other, "theirs", None, False, "2026-10-05", "09:00")
+    assert panel.notify_action(pconn, {"id": tid, "sig": panel.sign(pconn, tid), "action": "done"})[0] == 200
+    assert db.get_task(pconn, other, tid)["done_on"]
+
+
+# --- HTTP -------------------------------------------------------------------
+
+@pytest.fixture
+def http(pconn):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), panel.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+
+    def call(path, body=None, cookie=None, ip="1.1.1.1"):
+        headers = {"Content-Type": "application/json", "CF-Connecting-IP": ip,
+                   **({"Cookie": cookie} if cookie else {})}
+        req = urllib.request.Request(base + path, headers=headers,
+                                     data=None if body is None else json.dumps(body).encode())
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read() or b"null") if "json" in r.headers["Content-Type"] else None, r.headers
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"null"), e.headers
+    yield call
+    srv.shutdown()
+    panel.FAILS.clear()
+
+
+def _cookie_of(headers) -> str:
+    return headers["Set-Cookie"].split(";")[0]
+
+
+def test_http_sessions_are_per_login_and_end_on_logout(http):
+    assert http("/")[0] == 200 and http("/api/state")[0] == 401
+    code, _, h = http("/api/login", {"name": "admin", "password": "123456"})
+    assert code == 200
+    c1 = _cookie_of(h)
+    assert http("/api/state", cookie=c1)[1]["me"]["admin"] is True
+    assert http("/api/state", cookie="s=forged")[0] == 401
+    http("/api/logout", {}, cookie=c1)
+    assert http("/api/state", cookie=c1)[0] == 401
+
+
+def test_http_join_flow(http, pconn):
+    token = _invite(pconn)
+    assert http(f"/join/{token}")[0] == 200                    # the page itself
+    assert http(f"/api/invite/{token}")[0] == 200
+    code, body, _ = http("/api/join", {"token": token, "name": "R", "password": "secret1"})
+    assert code == 400                                         # name too short
+    code, _, h = http("/api/join", {"token": token, "name": "Ravi", "password": "secret1"})
+    assert code == 200
+    state = http("/api/state", cookie=_cookie_of(h))[1]
+    assert state["me"] == {"name": "Ravi", "admin": False}
+    assert http(f"/api/invite/{token}")[0] == 404              # spent
+    assert http("/api/admin", cookie=_cookie_of(h))[0] == 403
+
+
+def test_http_wrong_logins_lock_out_one_ip_not_everyone(http, monkeypatch):
+    monkeypatch.setattr(panel.time, "sleep", lambda s: None)
+    for _ in range(10):
+        assert http("/api/login", {"name": "admin", "password": "nope"}, ip="6.6.6.6")[0] == 401
+    assert http("/api/login", {"name": "admin", "password": "123456"}, ip="6.6.6.6")[0] == 429
+    assert http("/api/login", {"name": "admin", "password": "123456"}, ip="7.7.7.7")[0] == 200
