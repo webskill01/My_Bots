@@ -139,7 +139,7 @@ $('.bottom').innerHTML = TABS.map(([k, l]) => `<a href="#${k}" data-tab="${k}">$
 function showLogin() {
   $('#app').hidden = true; $('#joinSec').hidden = true; $('#login').hidden = false;
   try { $('#un').value = $('#un').value || localStorage.getItem('schedName') || ''; } catch (e) {}
-  ($('#un').value ? $('#pw') : $('#un')).focus();
+
 }
 $('#loginForm').onsubmit = async e => {
   e.preventDefault();
@@ -160,7 +160,6 @@ async function startJoin() {
     $('#joinSub').textContent = inv.claim_tasks ? `Your schedule is ready (${inv.claim_tasks} tasks). Pick a name and password to take it over.`
       : inv.label ? `Invite for ${inv.label} · create your account` : 'Create your account';
     if (inv.label && !$('#jName').value) $('#jName').value = inv.label;
-    $('#jName').focus();
   } catch (err) {
     $('#joinForm').innerHTML = `<p class="err" style="margin:0">${esc(err.message)}</p><p class="muted small" style="margin-top:8px">Ask for a new link, or <a href="/">log in</a> if you already have an account.</p>`;
   }
@@ -342,14 +341,14 @@ function wireAddForm(t) {
     $('#aHint').textContent = AF.time ? `Reminder at ${fmtTime(AF.time)} IST${AF.daily ? ' on ' + (fmtDays(AF.days) || 'no days yet') : ''}.`
       : 'No time: it goes under Anytime, with no reminder.';
   }
-  $$('[data-akind]').forEach(b => b.onclick = () => { AF.daily = b.dataset.akind === 'daily'; render(true); $('#aTitle').focus(); });
+  $$('[data-akind]').forEach(b => b.onclick = () => { AF.daily = b.dataset.akind === 'daily'; render(true); });
   $$('[data-aday]').forEach(b => b.onclick = () => { AF.days ^= 1 << b.dataset.aday; b.setAttribute('aria-pressed', !!(AF.days >> b.dataset.aday & 1)); paintHint(); });
   $('#aMore').onclick = () => openEdit(null, { ...addFormBody(), fromAdd: true });
   $('#addForm').onsubmit = e => {
     e.preventDefault();
     const err = $('#aErr'); err.hidden = true;
     const fail = m => { err.textContent = m; err.hidden = false; };
-    if (!AF.title.trim()) return $('#aTitle').focus();
+    if (!AF.title.trim()) return fail('Type what the task is first.');
     if (AF.daily && !AF.days) return fail('Pick at least one day.');
     if (!AF.daily && AF.date < t) return fail('That day has passed. Pick today or later.');
     if (!AF.daily && AF.date === t && AF.time && AF.time <= nowHM()) return fail(`${fmtTime(AF.time)} has already passed today (it’s ${fmtTime(nowHM())} IST).`);
@@ -392,23 +391,31 @@ function weekView(start) {
 
 // ---- Upcoming ----
 function upcomingView() {
-  const t = today();
+  const t = today(), hm = nowHM();
   const pick = list => list.filter(i => tagFilter === 'all' || i.tag === tagFilter);
-  const late = pick(overdue());
-  const ahead = pick(S.tasks.filter(i => !i.done_on && i.on_date >= t));
+  // left today: not done, and not over yet (a block runs to its end; a
+  // moment is over once its time passes). Untimed ones count until done.
+  const over = i => i.at_time && (i.end_time ? i.end_time <= hm : i.at_time < hm);
+  const left = pick(itemsOn(t).filter(i => !isDone(i, t) && !over(i)));
+  const timed = left.filter(i => i.at_time), anytime = left.filter(i => !i.at_time);
+  const cur = timed.find(i => i.at_time <= hm);
+  const later = pick(S.tasks.filter(i => !i.done_on && i.on_date > t));
   const groups = {};
-  ahead.forEach(i => (groups[i.on_date] = groups[i.on_date] || []).push(i));
+  later.forEach(i => (groups[i.on_date] = groups[i.on_date] || []).push(i));
   const tags = S.tags.filter(g => g.open);
   if (tagFilter !== 'all' && !tags.some(g => g.name === tagFilter)) tagFilter = 'all';
+  const badge = i => (i === cur ? '<span class="badge now">Now</span>'
+    : `<span class="badge next">in ${inText(mins(i.at_time) - mins(hm))}</span>`);
   $('#view').innerHTML = `
-    <div class="head"><div><h1>Upcoming</h1><p class="sub">One-time tasks from today on. Your routine lives in Week.</p></div></div>
+    <div class="head"><div><h1>Upcoming</h1><p class="sub">What’s left today, then what’s coming. Your full routine is in Week.</p></div></div>
     ${tags.length ? `<div class="chips" role="group" aria-label="Tag">${[['all', 'All'], ...tags.map(g => [g.name, g.name])].map(([k, l]) =>
       `<button class="chip" data-tag="${esc(k)}" aria-pressed="${tagFilter === k}">${k !== 'all' ? `<span class="dot" style="--tc:${tc(k)}"></span>` : ''}${esc(l)}</button>`).join('')}</div>` : ''}
-    ${late.length ? `<div class="sec-h"><h2>Overdue</h2><span class="cnt">${late.length}</span></div>
-      <div class="list">${late.map(i => row(i, i.on_date, `<span class="badge late">${esc(fmtDate(i.on_date, { day: 'numeric', month: 'short' }))}</span>`)).join('')}</div>` : ''}
+    <div class="sec-h"><h2>Rest of today</h2><span class="cnt">${left.length ? `${left.length} left` : ''}</span></div>
+    <div class="list">${timed.map(i => row(i, t, badge(i), i === cur)).join('')}${anytime.map(i => row(i, t)).join('')
+      || (timed.length ? '' : '<div class="empty">Nothing left today. 🎉</div>')}</div>
     ${Object.keys(groups).sort().map(d => `<div class="sec-h"><h2>${esc(dayLabel(d))}</h2><span class="cnt">${esc(fmtDate(d, { day: 'numeric', month: 'short' }))}</span></div>
       <div class="list">${groups[d].sort(byTime).map(i => row(i, d)).join('')}</div>`).join('')}
-    ${!late.length && !ahead.length ? '<div class="empty" style="margin-top:8px">Nothing coming up. Add one with the + button or type it on Today.</div>' : ''}`;
+    ${Object.keys(groups).length ? '' : '<p class="muted small" style="margin-top:14px">No one-time tasks on later days. Add one with the + button.</p>'}`;
   $$('[data-tag]').forEach(b => b.onclick = () => { tagFilter = b.dataset.tag; render(true); });
   wireRows();
 }
@@ -476,7 +483,8 @@ function settingsView() {
     pushBox = '<p class="note warn">Notifications are blocked for this site. Tap the lock icon next to the address (or the app’s info → Notifications), allow them, then reload.</p>';
   } else if (pushOn) {
     pushBox = `<p class="note ok">On for this device. ${S.devices > 1 ? `${S.devices} devices get reminders.` : ''}</p>
-      <div class="acts"><button class="b primary" id="pushTest">Send a test</button><button class="b line" id="pushOff">Turn off here</button></div>`;
+      <div class="acts"><button class="b primary" id="pushTest">Send a test</button><button class="b line" id="pushOff">Turn off here</button></div>
+      ${/Android/.test(navigator.userAgent) ? popupHelp() : ''}`;
   } else {
     pushBox = `<p class="muted small">Reminders arrive as phone notifications at each task’s time, with Done and Snooze buttons, even when the app is closed.</p>
       <div class="acts"><button class="b primary" id="pushOn">Turn on reminders</button></div>`;
@@ -617,6 +625,22 @@ async function copy(text, msg) {
   try { await navigator.clipboard.writeText(text); toast(msg); } catch (e) { toast('Copy failed — long-press the link to copy it', true); }
 }
 
+// Android decides per notification channel whether a notification pops over
+// the screen or only lands in the shade; a website can't set that itself.
+function popupHelp() {
+  const app = standalone();
+  return `<details class="help"><summary>Reminders not popping up on screen?</summary>
+    <p class="muted small">Android shows website notifications quietly unless you allow pop-ups once:</p>
+    <ol class="steps">${app
+      ? `<li>Long-press the <b>Schedule</b> icon → <b>App info</b> → <b>Notifications</b>.</li>
+         <li>Tap the notification category (it may be named after the site).</li>`
+      : `<li>Phone <b>Settings</b> → <b>Apps</b> → <b>Chrome</b> → <b>Notifications</b>.</li>
+         <li>Under sites, tap <b>schedule.easebuilds.in</b>.</li>`}
+      <li>Choose <b>Alerting</b> / <b>Default</b>, and turn on <b>Pop on screen</b> (Samsung: <b>Show as pop-up</b>).</li>
+      <li>Optional: <b>App info</b> → <b>Battery</b> → <b>Unrestricted</b>, so reminders arrive on time.</li></ol>
+    <p class="muted small">Then tap <b>Send a test</b> to check.</p></details>`;
+}
+
 // ---- push ----
 function keyBytes(b64) {
   const s = atob((b64 + '='.repeat((4 - b64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
@@ -699,7 +723,6 @@ function openEdit(t, draft) {
   $('#editErr').hidden = true;
   paintEdit();
   $('#edit').showModal();
-  if (!t) $('#fTitle').focus();
 }
 $('#fab').onclick = () => openEdit(null);
 $('#fCancel').onclick = () => $('#edit').close();

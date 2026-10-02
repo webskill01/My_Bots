@@ -16,6 +16,8 @@ self.addEventListener('push', e => {
       badge: '/badge.png',
       tag: reminder ? 'task-' + d.id : 'schedule',
       renotify: true,               // a snoozed task rings again, not silently
+      silent: false,                // sound + vibration: what lets Android pop it on screen
+      timestamp: Date.now(),
       requireInteraction: reminder, // stays until you act on it
       vibrate: [200, 100, 200, 100, 200],
       data: d,
