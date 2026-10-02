@@ -144,7 +144,7 @@ def is_due(task, now: dt.datetime) -> bool:
             return False
         lo = now - DAILY_GRACE
         floor = lo.strftime("%H:%M") if lo.date() == today else "00:00"
-        return floor <= task["at_time"] <= now.strftime("%H:%M")
+        return floor <= remind_at(task["at_time"], task["remind_before"]) <= now.strftime("%H:%M")
 
     if task["done_on"]:
         return False
@@ -153,7 +153,17 @@ def is_due(task, now: dt.datetime) -> bool:
     if not task["at_time"] or task["reminded_on"]:
         return False
     # One-offs catch up: a missed appointment reminder is still worth sending.
-    return f"{task['on_date']}T{task['at_time']}" <= stamp
+    start = dt.datetime.fromisoformat(f"{task['on_date']}T{task['at_time']}")
+    early = start - dt.timedelta(minutes=task["remind_before"] or 0)
+    return early.strftime("%Y-%m-%dT%H:%M") <= stamp
+
+
+def remind_at(hhmm: str, before: int) -> str:
+    """'16:00', 10 -> '15:50'. A routine can't ring yesterday: an early
+    reminder for a block just after midnight rings at midnight."""
+    h, m = map(int, hhmm.split(":"))
+    t = max(0, h * 60 + m - (before or 0))
+    return f"{t // 60:02d}:{t % 60:02d}"
 
 
 def fmt_days(days: int) -> str:

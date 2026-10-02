@@ -84,7 +84,7 @@ def test_fmt_time(hhmm, expected):
 
 def _t(**kw):
     base = dict(daily=0, on_date=TODAY.isoformat(), at_time="14:00", done_on=None,
-                reminded_on=None, snooze_until=None, days=127)
+                reminded_on=None, snooze_until=None, days=127, remind_before=0)
     return base | kw
 
 
@@ -486,7 +486,7 @@ def test_users_never_see_each_others_tasks(pconn):
     assert [t["title"] for t in s1["tasks"]] == ["mine"]
     assert [t["title"] for t in s2["tasks"]] == ["theirs"]
     assert panel.act(pconn, me(pconn, other), f"/api/task/{mine}/delete", {})[0] == 404
-    assert s2["me"] == {"name": "Ravi", "admin": False} and s1["me"]["admin"]
+    assert s2["me"] == {"name": "Ravi", "admin": False, "has_password": True} and s1["me"]["admin"]
 
 
 def test_reminders_go_only_to_the_owners_devices(pconn, monkeypatch):
@@ -551,8 +551,8 @@ def test_disabling_logs_out_and_silences_but_keeps_tasks(pconn):
 def test_changing_password_needs_the_current_one(pconn):
     other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("old-pw"))
     with pytest.raises(ValueError):
-        panel.act(pconn, me(pconn, other), "/api/password", {"current": "nope", "new": "new-pw"})
-    panel.act(pconn, me(pconn, other), "/api/password", {"current": "old-pw", "new": "new-pw"})
+        panel.act(pconn, me(pconn, other), "/api/account", {"current": "nope", "new": "new-pw"})
+    panel.act(pconn, me(pconn, other), "/api/account", {"current": "old-pw", "new": "new-pw"})
     assert panel.check_login(pconn, "Ravi", "new-pw")
 
 
@@ -610,7 +610,7 @@ def test_http_join_flow(http, pconn):
     code, _, h = http("/api/join", {"token": token, "name": "Ravi", "password": "secret1"})
     assert code == 200
     state = http("/api/state", cookie=_cookie_of(h))[1]
-    assert state["me"] == {"name": "Ravi", "admin": False}
+    assert state["me"] == {"name": "Ravi", "admin": False, "has_password": True}
     assert http(f"/api/invite/{token}")[0] == 404              # spent
     assert http("/api/admin", cookie=_cookie_of(h))[0] == 403
 
@@ -621,3 +621,103 @@ def test_http_wrong_logins_lock_out_one_ip_not_everyone(http, monkeypatch):
         assert http("/api/login", {"name": "admin", "password": "nope"}, ip="6.6.6.6")[0] == 401
     assert http("/api/login", {"name": "admin", "password": "123456"}, ip="6.6.6.6")[0] == 429
     assert http("/api/login", {"name": "admin", "password": "123456"}, ip="7.7.7.7")[0] == 200
+
+
+# --- handing accounts over --------------------------------------------------
+
+def test_admin_sets_own_name_and_password_then_the_pin_stops_working(pconn):
+    with pytest.raises(ValueError):    # the PIN proves it's the admin, but a password is required
+        panel.act(pconn, me(pconn), "/api/account", {"current": "123456", "name": "Nitin"})
+    panel.act(pconn, me(pconn), "/api/account", {"current": "123456", "name": "Nitin", "new": "own-pass"})
+    assert panel.check_login(pconn, "nitin", "own-pass")["user_id"] == 1
+    assert panel.check_login(pconn, "admin", "123456") is None
+    assert panel.check_login(pconn, "", "123456") is None
+    panel.setup(pconn)                  # a restart keeps the chosen name
+    assert db.get_user(pconn, 1)["name"] == "Nitin"
+
+
+def test_a_user_cannot_take_the_admin_login_name(pconn):
+    other = db.join(pconn, _invite(pconn), "Ravi", panel.hash_pw("x" * 6))
+    with pytest.raises(ValueError):
+        panel.act(pconn, me(pconn, other), "/api/account", {"current": "x" * 6, "name": "admin"})
+
+
+def test_a_claim_link_hands_an_old_account_with_its_data_to_its_owner(pconn):
+    db.get_or_create_user(pconn, 1880476085)          # the Telegram-era account, no login
+    db.add_task(pconn, 1880476085, "gym", None, True, None, "12:30")
+    assert [u["user_id"] for u in db.unclaimed(pconn)] == [1880476085]
+    code, out = panel.act(pconn, me(pconn), "/api/admin/claim/1880476085", {"label": "Ravi"})
+    token = out["path"].split("/")[-1]
+    assert db.join(pconn, token, "Ravi", panel.hash_pw("ravi-pw")) == 1880476085
+    user = panel.check_login(pconn, "Ravi", "ravi-pw")
+    assert user["user_id"] == 1880476085 and not user["is_admin"]
+    assert [t["title"] for t in panel.state(pconn, user)["routine"]] == ["gym"]
+    assert db.unclaimed(pconn) == []
+    with pytest.raises(ValueError):                    # can't be claimed twice
+        panel.act(pconn, me(pconn), "/api/admin/claim/1880476085", {})
+
+
+def test_two_claim_links_for_one_account_only_one_wins(pconn):
+    db.get_or_create_user(pconn, 99)
+    t1 = panel.act(pconn, me(pconn), "/api/admin/claim/99", {})[1]["path"].split("/")[-1]
+    t2 = panel.act(pconn, me(pconn), "/api/admin/claim/99", {})[1]["path"].split("/")[-1]
+    assert db.join(pconn, t1, "First", panel.hash_pw("x" * 6)) == 99
+    assert db.join(pconn, t2, "Second", panel.hash_pw("x" * 6)) is None
+    assert db.get_user(pconn, 99)["name"] == "First"
+
+
+# --- remind early, history --------------------------------------------------
+
+def test_remind_before_rings_early_for_one_offs_and_routines():
+    assert parse.is_due(_t(at_time="14:10", remind_before=10), NOW)
+    assert not parse.is_due(_t(at_time="14:11", remind_before=10), NOW)
+    assert parse.is_due(_t(daily=1, on_date=None, at_time="14:05", remind_before=5), NOW)
+    assert not parse.is_due(_t(daily=1, on_date=None, at_time="14:30", remind_before=15), NOW)
+
+
+def test_remind_before_across_midnight():
+    assert parse.remind_at("00:05", 10) == "00:00"
+    late = _t(on_date="2026-10-03", at_time="00:05", remind_before=10)
+    assert parse.is_due(late, dt.datetime(2026, 10, 2, 23, 55))      # one-off: the night before
+    assert not parse.is_due(late, dt.datetime(2026, 10, 2, 23, 54))
+
+
+def test_ticks_are_logged_per_day_and_old_ticks_are_backfilled(pconn):
+    tid = db.add_task(pconn, 1, "gym", None, True, None, "07:00")
+    panel.set_done(pconn, 1, tid, True, dt.date(2026, 10, 1))
+    panel.set_done(pconn, 1, tid, True, dt.date(2026, 10, 2))
+    panel.set_done(pconn, 1, tid, False, dt.date(2026, 10, 2))
+    assert [tuple(r) for r in db.done_days(pconn, 1, "2026-09-01")] == [(tid, "2026-10-01")]
+    old = db.add_task(pconn, 1, "old", None, False, "2026-09-20", None)
+    db.update_task(pconn, 1, old, done_on="2026-09-20")
+    db.init(pconn)
+    assert (old, "2026-09-20") in [tuple(r) for r in db.done_days(pconn, 1, "2026-09-01")]
+
+
+def test_task_fields_end_time_reminder_and_notes(pconn):
+    f = panel.fields_from(pconn, 1, {"title": "edit", "on_date": "2026-10-05", "at_time": "10:00",
+                                     "end_time": "12:00", "remind_before": 15, "notes": " cut intro "})
+    assert (f["end_time"], f["remind_before"], f["notes"]) == ("12:00", 15, "cut intro")
+    for bad in ({"end_time": "09:00"}, {"end_time": "11:00", "at_time": None}, {"remind_before": 7}):
+        with pytest.raises(ValueError):
+            panel.fields_from(pconn, 1, {"title": "x", "on_date": "2026-10-05", "at_time": "10:00"} | bad)
+
+
+def test_state_carries_history(pconn):
+    tid = db.add_task(pconn, 1, "gym", None, True, None, "07:00")
+    today = db.user_now(me(pconn)).date()
+    panel.set_done(pconn, 1, tid, True, today - dt.timedelta(days=3))
+    assert [tid, (today - dt.timedelta(days=3)).isoformat()] in panel.state(pconn, me(pconn))["log"]
+
+
+def test_a_forgotten_routine_tick_can_be_added_for_a_past_day(pconn):
+    today = db.user_now(me(pconn)).date()
+    yesterday = (today - dt.timedelta(days=1)).isoformat()
+    tid = db.add_task(pconn, 1, "gym", None, True, None, "07:00")
+    panel.act(pconn, me(pconn), f"/api/task/{tid}/done", {"done": True, "day": yesterday})
+    t = db.get_task(pconn, 1, tid)
+    assert t["done_on"] is None                       # today's reminder still rings
+    assert [tid, yesterday] in panel.state(pconn, me(pconn))["log"]
+    with pytest.raises(ValueError):
+        panel.act(pconn, me(pconn), f"/api/task/{tid}/done",
+                  {"done": True, "day": (today + dt.timedelta(days=1)).isoformat()})

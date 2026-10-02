@@ -36,10 +36,12 @@ const ICON = {
   check: '<path d="M5 12l5 5L20 7"/>',
   repeat: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/>',
   prev: '<path d="M15 18l-6-6 6-6"/>',
+  stats: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>',
   next: '<path d="M9 18l6-6-6-6"/>',
 };
 const svg = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[k]}</svg>`;
-const TABS = [['today', 'Today'], ['week', 'Week'], ['upcoming', 'Upcoming'], ['settings', 'Settings']];
+const TABS = [['today', 'Today'], ['week', 'Week'], ['upcoming', 'Upcoming'], ['stats', 'Stats'], ['settings', 'Settings']];
 
 let S = null;              // /api/state
 let fetchedAt = 0;         // Date.now() when S arrived; S.now advances from there
@@ -50,6 +52,7 @@ let installEvt = null;
 let pushOn = false;        // this browser has a live subscription
 let synced = false;
 
+const tzLabel = () => (S.tz === 'Asia/Kolkata' ? 'IST' : S.tz.split('/').pop().replace(/_/g, ' '));
 // "now" in the user's timezone: the server's clock plus the time since it said so
 function liveNow() {
   const t = new Date(Date.parse(S.now + ':00Z') + (Date.now() - fetchedAt));
@@ -88,9 +91,11 @@ $('#dlgNo').onclick = () => $('#dlg').close('no');
 // ---- the schedule model ----
 const byTime = (a, b) => (a.at_time == null) - (b.at_time == null) || (a.at_time || '').localeCompare(b.at_time || '') || a.id - b.id;
 const itemsOn = date => [...S.routine.filter(t => t.days >> wd(date) & 1), ...S.tasks.filter(t => t.on_date === date)].sort(byTime);
-// a routine task's tick only lives for today: the server keeps one done date
-const isDone = (t, date) => (t.daily ? t.done_on === date && date === today() : !!t.done_on);
-const canTick = (t, date) => !t.daily || date === today();
+// every tick is logged per day, so a routine's past days show what really happened
+const LOG = () => S._log || (S._log = new Set(S.log.map(([id, day]) => id + '|' + day)));
+const isDone = (t, date) => (t.daily ? LOG().has(t.id + '|' + date) : !!t.done_on);
+// routines: today or a day you forgot to tick (not the future); one-offs: any time
+const canTick = (t, date) => !t.daily || date <= today();
 const overdue = () => S.tasks.filter(t => !t.done_on && t.on_date < today()).sort((a, b) => a.on_date.localeCompare(b.on_date) || byTime(a, b));
 const findTask = id => S.routine.find(t => t.id === id) || S.tasks.find(t => t.id === id);
 
@@ -99,12 +104,16 @@ function tagHtml(t) { return t.tag ? `<span class="tag" style="--tc:${tc(t.tag)}
 function row(t, date, badges = '', cur = false) {
   const done = isDone(t, date);
   const snz = t.snooze_until && !done ? `<span class="badge snz">Snoozed · ${fmtTime(t.snooze_until.slice(11))}</span>` : '';
-  const meta = [tagHtml(t), t.daily ? `<span>${svg('repeat')} ${esc(fmtDays(t.days))}</span>` : '',
-    !t.daily && t.on_date !== date ? `<span>${esc(fmtDate(t.on_date, { day: 'numeric', month: 'short' }))}</span>` : ''].filter(Boolean).join('');
+  const meta = [tagHtml(t),
+    t.end_time ? `<span>until ${fmtTime(t.end_time)}</span>` : '',
+    t.daily ? `<span>${svg('repeat')} ${esc(fmtDays(t.days))}</span>` : '',
+    !t.daily && t.on_date !== date ? `<span>${esc(fmtDate(t.on_date, { day: 'numeric', month: 'short' }))}</span>` : '',
+    t.at_time && t.remind_before ? `<span>${svg('bell')} ${t.remind_before} min early</span>` : ''].filter(Boolean).join('');
+  const note = (t.notes || '').split('\n')[0];
   return `<div class="row ${done ? 'done' : ''} ${cur ? 'cur' : ''}" data-open="${t.id}" style="--tc:${tc(t.tag)}">
     <button class="check" type="button" data-done="${t.id}" data-date="${date}" aria-pressed="${done}" aria-label="${done ? 'Mark not done' : 'Mark done'}: ${esc(t.title)}" ${canTick(t, date) ? '' : 'disabled'}>${svg('check')}</button>
     <div class="tm">${t.at_time ? fmtTime(t.at_time).replace(' ', '<small>') + '</small>' : '<small>Anytime</small>'}</div>
-    <div style="min-width:0"><div class="t1">${esc(t.title)}</div>${meta ? `<div class="t2">${meta}</div>` : ''}</div>
+    <div style="min-width:0"><div class="t1">${esc(t.title)}</div>${meta ? `<div class="t2">${meta}</div>` : ''}${note ? `<div class="t3">${esc(note)}</div>` : ''}</div>
     <div class="r">${badges}${snz}</div></div>`;
 }
 
@@ -112,9 +121,11 @@ function wireRows() {
   $$('[data-done]').forEach(b => b.onclick = e => {
     e.stopPropagation();
     const t = findTask(+b.dataset.done), done = b.getAttribute('aria-pressed') !== 'true';
+    const day = t.daily ? b.dataset.date : today();   // a one-off is done when you do it
     busy(b, async () => {
-      await api(`/api/task/${t.id}/done`, { done });
-      t.done_on = done ? today() : null;   // instant feedback; the refresh confirms
+      await api(`/api/task/${t.id}/done`, { done, day });
+      // instant feedback; the refresh confirms
+      if (t.daily) LOG()[done ? 'add' : 'delete'](t.id + '|' + day); else t.done_on = done ? day : null;
       render(true);
       refresh();
     });
@@ -146,7 +157,8 @@ async function startJoin() {
   $('#login').hidden = true; $('#app').hidden = true; $('#joinSec').hidden = false;
   try {
     const inv = await api(`/api/invite/${joinToken}`);
-    $('#joinSub').textContent = inv.label ? `Invite for ${inv.label} · create your account` : 'Create your account';
+    $('#joinSub').textContent = inv.claim_tasks ? `Your schedule is ready (${inv.claim_tasks} tasks). Pick a name and password to take it over.`
+      : inv.label ? `Invite for ${inv.label} · create your account` : 'Create your account';
     if (inv.label && !$('#jName').value) $('#jName').value = inv.label;
     $('#jName').focus();
   } catch (err) {
@@ -169,7 +181,7 @@ $('#joinForm').onsubmit = async e => {
   finally { btn.disabled = false; }
 };
 
-const VIEWS = { today: dayView, day: dayView, week: weekView, upcoming: upcomingView, settings: settingsView };
+const VIEWS = { today: dayView, day: dayView, week: weekView, upcoming: upcomingView, stats: statsView, settings: settingsView };
 function route() {
   let [name, ...arg] = location.hash.slice(1).split('/');
   if (!VIEWS[name]) name = 'today';
@@ -180,7 +192,7 @@ function route() {
 function render(force) {
   if (!S) return;
   const [name, arg] = route();
-  $('#clock').textContent = `${fmtDate(today(), { weekday: 'short', day: 'numeric', month: 'short' })} · ${fmtTime(nowHM())}`;
+  $('#clock').innerHTML = `<span class="cd">${fmtDate(today(), { weekday: 'short', day: 'numeric', month: 'short' })} · </span>${fmtTime(nowHM())} <span class="tz">${esc(tzLabel())}</span>`;
   $('#bell').hidden = pushOn || !pushSupported();
   // never redraw under the user's fingers: typing or a dialog
   const typing = document.activeElement && $('#view').contains(document.activeElement) && /INPUT|SELECT/.test(document.activeElement.tagName);
@@ -213,63 +225,138 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 setInterval(() => render(false), 60000);   // Now / Next move with the clock
 
 // ---- Today (and any single day) ----
+// The add form's draft survives re-renders (the clock redraws every minute).
+const AF = { title: '', daily: false, days: 0, date: '', time: '', tag: '', for: '' };
+function nextSlot() {   // the next :00 or :30 from now, today
+  const m = Math.ceil((mins(nowHM()) + 1) / 30) * 30;
+  return m >= 24 * 60 ? '' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+function greeting() {
+  const h = +nowHM().slice(0, 2);
+  return `${h < 5 ? 'Late night' : h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'}${S.me.name ? ', ' + S.me.name : ''}`;
+}
+
 function dayView(date) {
   const t = today();
   date = /^\d{4}-\d{2}-\d{2}$/.test(date || '') ? date : t;
-  const items = itemsOn(date), isToday = date === t;
+  const items = itemsOn(date), isToday = date === t, past = date < t;
   const timed = items.filter(i => i.at_time), anytime = items.filter(i => !i.at_time);
   const done = items.filter(i => isDone(i, date)).length;
 
-  // Now = the block that started most recently, unless it's already ticked off
-  // (an earlier block you skipped isn't "now"); Next = the first one still ahead
+  // Now = the latest block that has started and hasn't ended; if it's ticked
+  // off, Next takes over. Earlier blocks left unticked are Missed.
   let cur = null, next = null;
+  const hm = nowHM(), missed = new Set();
   if (isToday) {
-    const hm = nowHM();
-    cur = [...timed].reverse().find(i => i.at_time <= hm) || null;
+    const started = timed.filter(i => i.at_time <= hm);
+    cur = [...started].reverse().find(i => !i.end_time || i.end_time > hm) || null;
     if (cur && isDone(cur, date)) cur = null;
     next = timed.find(i => i.at_time > hm && !isDone(i, date)) || null;
+    started.forEach(i => { if (i !== cur && !isDone(i, date) && (!i.end_time || i.end_time <= hm)) missed.add(i); });
+  } else if (past) {
+    timed.forEach(i => { if (!isDone(i, date)) missed.add(i); });
   }
   const goal = items.find(i => i.tag === 'goal');
   const late = isToday ? overdue() : [];
 
-  const badges = i => (i === cur ? '<span class="badge now">Now</span>' : i === next ? `<span class="badge next">in ${inText(mins(i.at_time) - mins(nowHM()))}</span>` : '');
+  const badges = i => (i === cur ? '<span class="badge now">Now</span>'
+    : i === next ? `<span class="badge next">in ${inText(mins(i.at_time) - mins(hm))}</span>`
+    : missed.has(i) ? '<span class="badge late">Missed</span>' : '');
+  // the "now" line sits before the first block that hasn't started yet
+  const nowAt = isToday ? timed.findIndex(i => i.at_time > hm) : -1;
+  const nowLine = `<div class="nowline" aria-hidden="true"><span>${fmtTime(hm)} · now</span></div>`;
+  const schedule = timed.map((i, n) => (n === nowAt ? nowLine : '') + row(i, date, badges(i), i === cur)).join('')
+    + (isToday && nowAt === -1 && timed.length ? nowLine : '');
+
+  if (AF.for !== date) {   // a new day in view: fresh defaults for it
+    Object.assign(AF, { for: date, date: past ? t : date, days: 1 << wd(date), time: isToday ? nextSlot() : '' });
+  }
+  const sub = isToday ? `${greeting()} · ${fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' })}`
+    : fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
   $('#view').innerHTML = `
     <div class="head">
-      <div><h1>${esc(dayLabel(date))}</h1><p class="sub">${esc(fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' }))}</p></div>
+      <div><h1>${esc(dayLabel(date))}</h1><p class="sub">${esc(sub)}</p></div>
       <div class="nav">
         <a class="b icon line" href="#day/${addDays(date, -1)}" aria-label="Previous day">${svg('prev')}</a>
         ${isToday ? '' : '<a class="b line" href="#today">Today</a>'}
         <a class="b icon line" href="#day/${addDays(date, 1)}" aria-label="Next day">${svg('next')}</a>
       </div>
     </div>
-    <form class="quick" id="quick">
-      <input id="qText" placeholder="call mom 6pm #family · gym 7am #daily" autocomplete="off" aria-label="Quick add">
-      <button class="b primary" type="submit">Add</button>
-    </form>
+    ${addFormHtml(t)}
     <div class="tiles">
       ${goal ? `<div class="tile goal"><div class="l">Main goal</div><div class="v txt">${esc(goal.title.replace(/^🎯\s*(Goal:\s*)?/, ''))}</div></div>` : ''}
-      <div class="tile"><div class="l">Done</div><div class="v">${done}<span class="muted" style="font-size:15px"> / ${items.length}</span></div>
+      <div class="tile"><div class="l">${past ? 'Got done' : 'Done'}</div><div class="v">${done}<span class="muted" style="font-size:15px"> / ${items.length}</span></div>
         <div class="bar"><i style="width:${items.length ? Math.round(done * 100 / items.length) : 0}%"></i></div></div>
       ${isToday ? `<div class="tile"><div class="l">${cur ? 'Now' : 'Next'}</div>${(cur || next)
-        ? `<div class="v txt">${esc((cur || next).title)}</div><div class="s">${cur ? `since ${fmtTime(cur.at_time)}` : `${fmtTime(next.at_time)} · in ${inText(mins(next.at_time) - mins(nowHM()))}`}</div>`
+        ? `<div class="v txt">${esc((cur || next).title)}</div><div class="s">${cur
+          ? (cur.end_time ? `until ${fmtTime(cur.end_time)} · ${inText(mins(cur.end_time) - mins(hm))} left` : `since ${fmtTime(cur.at_time)}`)
+          : `${fmtTime(next.at_time)} · in ${inText(mins(next.at_time) - mins(hm))}`}</div>`
         : '<div class="v txt">All clear</div><div class="s">Nothing else timed today</div>'}</div>` : ''}
     </div>
+    ${past ? '<p class="note">A past day: tick anything you did but forgot to mark.</p>' : ''}
     ${late.length ? `<div class="sec-h"><h2>Overdue</h2><span class="cnt">${late.length}</span></div>
       <div class="list">${late.map(i => row(i, date, `<span class="badge late">${esc(fmtDate(i.on_date, { day: 'numeric', month: 'short' }))}</span>`)).join('')}</div>` : ''}
     <div class="sec-h"><h2>Schedule</h2><span class="cnt">${timed.length}</span></div>
-    <div class="list">${timed.map(i => row(i, date, badges(i), i === cur)).join('') || '<div class="empty">Nothing timed on this day.</div>'}</div>
+    <div class="list">${schedule || '<div class="empty">Nothing timed on this day.</div>'}</div>
     ${anytime.length ? `<div class="sec-h"><h2>Anytime</h2><span class="cnt">${anytime.length}</span></div>
       <div class="list">${anytime.map(i => row(i, date)).join('')}</div>` : ''}`;
   wireRows();
-  $('#quick').onsubmit = e => {
+  wireAddForm(t);
+}
+
+// ---- the add form: real pickers, no text to parse ----
+function addFormHtml(t) {
+  return `<form class="card add" id="addForm" autocomplete="off">
+    <div class="add-top">
+      <input id="aTitle" maxlength="100" placeholder="What do you need to do?" value="${esc(AF.title)}" aria-label="Task">
+      <button class="b primary" type="submit">Add</button>
+    </div>
+    <div class="add-opts">
+      <div class="seg sm" role="group" aria-label="How often">
+        <button type="button" data-akind="once" aria-pressed="${!AF.daily}">One time</button>
+        <button type="button" data-akind="daily" aria-pressed="${AF.daily}">Repeats</button>
+      </div>
+      ${AF.daily
+        ? `<div class="days sm" role="group" aria-label="Days">${DAYS.map((d, i) => `<button type="button" data-aday="${i}" aria-pressed="${!!(AF.days >> i & 1)}">${d.slice(0, 2)}</button>`).join('')}</div>`
+        : `<label class="fld"><span>Day</span><input id="aDate" type="date" min="${t}" value="${AF.date}"></label>`}
+      <label class="fld"><span>Time (IST)</span><input id="aTime" type="time" value="${AF.time}"></label>
+      <label class="fld"><span>Tag</span><input id="aTag" list="tagList" placeholder="none" value="${esc(AF.tag)}"></label>
+      <button type="button" class="b sm line more" id="aMore">More options</button>
+    </div>
+    <p class="hint" id="aHint">${AF.time ? `Reminder at ${fmtTime(AF.time)} IST${AF.daily ? ' on ' + esc(fmtDays(AF.days || 0) || 'no days yet') : ''}.` : 'No time: it goes under Anytime, with no reminder.'}</p>
+    <p class="err" id="aErr" hidden></p>
+  </form>`;
+}
+
+function addFormBody() {
+  return { title: AF.title, daily: AF.daily, days: AF.days, on_date: AF.date, at_time: AF.time || null, tag: AF.tag };
+}
+
+function wireAddForm(t) {
+  $('#tagList').innerHTML = S.tags.map(g => `<option value="${esc(g.name)}">`).join('');
+  const keep = (id, key) => { const el = $(id); if (el) el.oninput = () => { AF[key] = el.value; if (key !== 'title') paintHint(); }; };
+  keep('#aTitle', 'title'); keep('#aDate', 'date'); keep('#aTime', 'time'); keep('#aTag', 'tag');
+  function paintHint() {
+    $('#aHint').textContent = AF.time ? `Reminder at ${fmtTime(AF.time)} IST${AF.daily ? ' on ' + (fmtDays(AF.days) || 'no days yet') : ''}.`
+      : 'No time: it goes under Anytime, with no reminder.';
+  }
+  $$('[data-akind]').forEach(b => b.onclick = () => { AF.daily = b.dataset.akind === 'daily'; render(true); $('#aTitle').focus(); });
+  $$('[data-aday]').forEach(b => b.onclick = () => { AF.days ^= 1 << b.dataset.aday; b.setAttribute('aria-pressed', !!(AF.days >> b.dataset.aday & 1)); paintHint(); });
+  $('#aMore').onclick = () => openEdit(null, { ...addFormBody(), fromAdd: true });
+  $('#addForm').onsubmit = e => {
     e.preventDefault();
-    const text = $('#qText').value.trim();
-    if (!text) return;
+    const err = $('#aErr'); err.hidden = true;
+    const fail = m => { err.textContent = m; err.hidden = false; };
+    if (!AF.title.trim()) return $('#aTitle').focus();
+    if (AF.daily && !AF.days) return fail('Pick at least one day.');
+    if (!AF.daily && AF.date < t) return fail('That day has passed. Pick today or later.');
+    if (!AF.daily && AF.date === t && AF.time && AF.time <= nowHM()) return fail(`${fmtTime(AF.time)} has already passed today (it’s ${fmtTime(nowHM())} IST).`);
     busy(e.submitter, async () => {
-      const { task } = await api('/api/quick', { text });
-      $('#qText').value = '';
-      $('#qText').blur();
-      toast(`Added: ${task.title} · ${task.daily ? fmtDays(task.days) : dayLabel(task.on_date)}${task.at_time ? ' ' + fmtTime(task.at_time) : ''}`);
+      const { task } = await api('/api/task', addFormBody());
+      AF.title = '';
+      if (AF.date === t && !AF.daily) AF.time = nextSlot();
+      toast(`Added: ${task.title} · ${task.daily ? fmtDays(task.days) : dayLabel(task.on_date)}${task.at_time ? ' at ' + fmtTime(task.at_time) : ''}`);
       await refresh(true);
     });
   };
@@ -325,6 +412,53 @@ function upcomingView() {
   wireRows();
 }
 
+// ---- Stats: built from the tick log ----
+let statDays = 7;
+const pct = (a, b) => (b ? Math.round(a * 100 / b) : 0);
+function statsView() {
+  const t = today();
+  const days = [...Array(statDays)].map((_, i) => addDays(t, i - statDays + 1));
+  // what was scheduled each day: only tasks that existed by then
+  const sched = d => itemsOn(d).filter(i => i.created <= d);
+  const perDay = days.map(d => { const s = sched(d); return { d, total: s.length, done: s.filter(i => isDone(i, d)).length }; });
+  const total = perDay.reduce((a, x) => a + x.total, 0), done = perDay.reduce((a, x) => a + x.done, 0);
+
+  // streak: days in a row (back from yesterday, plus today once it's there) at 80%+
+  const good = d => { const s = sched(d); return s.length && s.filter(i => isDone(i, d)).length / s.length >= 0.8; };
+  let streak = good(t) ? 1 : 0;
+  for (let d = addDays(t, -1); good(d) && streak < 60; d = addDays(d, -1)) streak++;
+
+  const byTag = {}, byTask = {};
+  days.forEach(d => sched(d).forEach(i => {
+    const k = i.tag || 'untagged', ok = isDone(i, d);
+    byTag[k] = byTag[k] || { done: 0, total: 0 }; byTag[k].total++; if (ok) byTag[k].done++;
+    if (i.daily) { byTask[i.id] = byTask[i.id] || { t: i, done: 0, total: 0 }; byTask[i.id].total++; if (ok) byTask[i.id].done++; }
+  }));
+  const tags = Object.entries(byTag).sort((a, b) => b[1].total - a[1].total);
+  const tasks = Object.values(byTask).sort((a, b) => pct(a.done, a.total) - pct(b.done, b.total) || b.total - a.total);
+  const best = perDay.filter(x => x.total).sort((a, b) => pct(b.done, b.total) - pct(a.done, a.total))[0];
+  const meter = (a, b, color) => `<div class="meter"><i style="width:${pct(a, b)}%;${color ? `background:${color}` : ''}"></i></div>`;
+
+  $('#view').innerHTML = `
+    <div class="head"><div><h1>Stats</h1><p class="sub">From what you ticked off. IST days.</p></div>
+      <div class="chips" style="margin:0" role="group" aria-label="Range">${[7, 30].map(n => `<button class="chip" data-range="${n}" aria-pressed="${statDays === n}">${n} days</button>`).join('')}</div></div>
+    <div class="tiles">
+      <div class="tile"><div class="l">Done</div><div class="v">${pct(done, total)}%</div><div class="s">${done} of ${total} tasks</div></div>
+      <div class="tile"><div class="l">Streak</div><div class="v">${streak}<span class="muted" style="font-size:15px"> day${streak === 1 ? '' : 's'}</span></div><div class="s">80%+ done each day</div></div>
+      <div class="tile"><div class="l">Best day</div><div class="v txt">${best ? esc(dayLabel(best.d)) : '—'}</div><div class="s">${best ? `${best.done} of ${best.total} · ${pct(best.done, best.total)}%` : 'Nothing yet'}</div></div>
+    </div>
+    <div class="card"><h2>Day by day</h2>
+      <div class="bars ${statDays > 7 ? 'many' : ''}">${perDay.map(x => `<a class="barcol" href="#day/${x.d}" title="${esc(dayLabel(x.d))}: ${x.done} of ${x.total}">
+        <span class="bv">${x.total ? pct(x.done, x.total) + '%' : ''}</span>
+        <span class="bt"><i style="height:${pct(x.done, x.total)}%" class="${x.d === t ? 'today' : ''}"></i></span>
+        <span class="bl">${statDays > 7 ? D(x.d).getUTCDate() : DAYS[wd(x.d)].slice(0, 2)}</span></a>`).join('')}</div>
+    </div>
+    ${tags.length ? `<div class="card"><h2>By tag</h2>${tags.map(([k, v]) => `<div class="mrow"><span class="ml"><span class="dot" style="--tc:${tc(k === 'untagged' ? '' : k)}"></span> ${esc(k)}</span>${meter(v.done, v.total, tc(k === 'untagged' ? '' : k))}<span class="mv">${v.done}/${v.total}</span></div>`).join('')}</div>` : ''}
+    ${tasks.length ? `<div class="card"><h2>Routine consistency</h2><p class="muted small" style="margin-bottom:8px">Lowest first: what keeps slipping.</p>${tasks.map(x => `<div class="mrow"><span class="ml">${esc(x.t.title)}${x.t.at_time ? ` <span class="muted">${fmtTime(x.t.at_time)}</span>` : ''}</span>${meter(x.done, x.total, tc(x.t.tag))}<span class="mv">${x.done}/${x.total}</span></div>`).join('')}</div>` : ''}
+    ${!total ? '<div class="empty">No history yet. Tick tasks off on Today and your stats build up here.</div>' : ''}`;
+  $$('[data-range]').forEach(b => b.onclick = () => { statDays = +b.dataset.range; render(true); });
+}
+
 // ---- Settings ----
 const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
@@ -371,15 +505,22 @@ function settingsView() {
     <div class="card">
       <h2>Account</h2>
       <div class="srow"><div class="tx"><b>${esc(S.me.name)}</b><span>${S.me.admin ? 'Admin · password is the panel PIN' : 'Stays logged in on this device'}</span></div><button class="b warn" id="logout">Log out</button></div>
-      ${S.me.admin ? '' : `<form id="pwForm" style="border-top:1px solid var(--line);padding-top:4px">
-        <label for="pwCur">Current password</label><input id="pwCur" type="password" autocomplete="current-password" required>
-        <label for="pwNew">New password</label><input id="pwNew" type="password" autocomplete="new-password" minlength="6" required>
-        <div class="acts"><button class="b line" type="submit">Change password</button></div></form>`}
+      ${S.me.admin && !S.me.has_password ? '<p class="note warn">You’re still on the shared PIN. Set your own name and password below: after that only your password logs in as admin.</p>' : ''}
+      <form id="pwForm" style="border-top:1px solid var(--line);padding-top:4px;margin-top:8px">
+        <label for="acName">Login name</label><input id="acName" value="${esc(S.me.name || '')}" autocomplete="username" required minlength="2" maxlength="32">
+        <label for="pwCur">${S.me.has_password ? 'Current password' : 'Current PIN'}</label><input id="pwCur" type="password" autocomplete="current-password" required>
+        <label for="pwNew">New password ${S.me.has_password ? '<span class="muted">(leave blank to keep)</span>' : ''}</label>
+        <input id="pwNew" type="password" autocomplete="new-password" minlength="6" ${S.me.has_password ? '' : 'required'}>
+        <div class="acts"><button class="b ${S.me.has_password ? 'line' : 'primary'}" type="submit">Save</button></div></form>
     </div>`;
   if (S.me.admin) wirePeople();
   $('#pwForm') && ($('#pwForm').onsubmit = e => {
     e.preventDefault();
-    busy(e.submitter, async () => { await api('/api/password', { current: $('#pwCur').value, new: $('#pwNew').value }); $('#pwForm').reset(); toast('Password changed'); });
+    busy(e.submitter, async () => {
+      await api('/api/account', { name: $('#acName').value, current: $('#pwCur').value, new: $('#pwNew').value });
+      try { localStorage.setItem('schedName', $('#acName').value.trim()); } catch (err) {}
+      toast('Account saved'); await refresh(true);
+    });
   });
 
   $('#pushOn') && ($('#pushOn').onclick = e => busy(e.currentTarget, enablePush));
@@ -431,7 +572,11 @@ function peopleCard() {
     ${A.people.map(p => `<div class="srow"><div class="tx"><b>${esc(p.name)} ${p.is_admin ? '<span class="pill admin">admin</span>' : ''}${p.disabled ? '<span class="pill off">disabled</span>' : ''}</b>
         <span>${p.tasks} tasks · ${p.devices ? `${p.devices} device${p.devices > 1 ? 's' : ''} with reminders` : 'reminders off'} · joined ${ago(p.created_at)}</span></div>
         ${p.is_admin ? '' : `<button class="b sm ${p.disabled ? 'line' : 'warn'}" data-user="${p.user_id}" data-off="${p.disabled ? 0 : 1}">${p.disabled ? 'Enable' : 'Disable'}</button>`}</div>`).join('')}
-    ${pending.length ? `<h2 style="margin-top:16px">Unused invites</h2>${pending.map(i => `<div class="srow"><div class="tx"><b>${esc(i.label || 'No name')}</b><span>made ${ago(i.created_at)} · expires in ${Math.max(0, Math.ceil((Date.parse(i.expires_at) - Date.now()) / 864e5))} days</span></div>
+    ${A.unclaimed.length ? `<h2 style="margin-top:16px">Waiting to be claimed</h2>
+      <p class="muted small">Schedules from before accounts existed. A claim link lets the owner take one over, with all its tasks.</p>
+      ${A.unclaimed.map(u => `<div class="srow"><div class="tx"><b>Account #${u.user_id}</b><span>${u.tasks} tasks · no login yet</span></div>
+        <button class="b sm primary" data-claim="${u.user_id}">Make claim link</button></div>`).join('')}` : ''}
+    ${pending.length ? `<h2 style="margin-top:16px">Unused invites</h2>${pending.map(i => `<div class="srow"><div class="tx"><b>${esc(i.label || 'No name')}${i.claim ? ' <span class="pill admin">claim</span>' : ''}</b><span>made ${ago(i.created_at)} · expires in ${Math.max(0, Math.ceil((Date.parse(i.expires_at) - Date.now()) / 864e5))} days</span></div>
         <div class="acts" style="margin:0"><button class="b sm line" data-copy="${esc(absLink('/join/' + i.token))}">Copy</button><button class="b sm warn" data-revoke="${esc(i.token)}">Revoke</button></div></div>`).join('')}` : ''}
   </div>`;
 }
@@ -446,6 +591,12 @@ function wirePeople() {
       await loadAdmin();
     });
   };
+  $$('[data-claim]').forEach(b => b.onclick = () => busy(b, async () => {
+    const { path } = await api(`/api/admin/claim/${b.dataset.claim}`, { label: `Account #${b.dataset.claim}` });
+    freshLink = absLink(path);
+    await copy(freshLink, 'Claim link made and copied');
+    await loadAdmin();
+  }));
   $$('[data-copy]').forEach(b => b.onclick = () => copy(b.dataset.copy, 'Link copied'));
   $$('[data-share]').forEach(b => b.onclick = () => navigator.share({ title: 'Schedule invite', text: 'Your invite to Schedule:', url: b.dataset.share }).catch(() => {}));
   $$('[data-revoke]').forEach(b => b.onclick = () => busy(b, async () => {
@@ -507,33 +658,43 @@ async function syncPush() {
 }
 
 // ---- add / edit ----
-const E = { task: null, kind: 'once', days: 127 };
+const E = { task: null, kind: 'once', days: 127, fromAdd: false };
 $('#fDays').innerHTML = DAYS.map((d, i) => `<button type="button" data-day="${i}">${d.slice(0, 2)}</button>`).join('');
 function paintEdit() {
   $$('[data-kind]').forEach(b => b.setAttribute('aria-pressed', b.dataset.kind === E.kind));
   $('#onceBox').hidden = E.kind !== 'once';
   $('#dailyBox').hidden = E.kind !== 'daily';
   $$('[data-day]').forEach(b => b.setAttribute('aria-pressed', !!(E.days >> b.dataset.day & 1)));
-  $('#timeHint').hidden = !!$('#fTime').value;
+  const timed = !!$('#fTime').value;
+  $('#timeHint').hidden = timed;
+  $('#fEnd').disabled = $('#fRemind').disabled = !timed;
+  $('#fDate').min = E.task ? '' : today();   // a new one-off can't start in the past
 }
 $$('[data-kind]').forEach(b => b.onclick = () => { E.kind = b.dataset.kind; paintEdit(); });
 $$('[data-day]').forEach(b => b.onclick = () => { E.days ^= 1 << b.dataset.day; paintEdit(); });
 $$('[data-preset]').forEach(b => b.onclick = () => { E.days = +b.dataset.preset; paintEdit(); });
 $('#fTime').oninput = paintEdit;
 
-function openEdit(t) {
+// t: the task being edited (null for new); draft: values to start a new one
+// from (the add form's More options, or Duplicate)
+function openEdit(t, draft) {
+  const src = t || draft || {};
   const [name, arg] = route();
-  const viewing = name === 'day' && arg[0] ? arg[0] : today();
+  const viewing = name === 'day' && arg[0] >= today() ? arg[0] : today();
   E.task = t || null;
-  E.kind = t && t.daily ? 'daily' : 'once';
-  E.days = t && t.daily ? t.days : 127;
-  $('#editTitle').textContent = t ? 'Edit task' : 'New task';
-  $('#fTitle').value = t ? t.title : '';
-  $('#fDate').value = t && t.on_date ? t.on_date : viewing;
-  $('#fTime').value = t && t.at_time ? t.at_time : '';
-  $('#fTag').value = t && t.tag ? t.tag : '';
+  E.fromAdd = !!(draft && !t && draft.fromAdd);
+  E.kind = src.daily ? 'daily' : 'once';
+  E.days = src.daily ? src.days || 0 : 1 << wd(viewing);
+  $('#editTitle').textContent = t ? 'Edit task' : draft && draft.id ? 'Copy of task' : 'New task';
+  $('#fTitle').value = src.title || '';
+  $('#fDate').value = src.on_date && (t || src.on_date >= today()) ? src.on_date : viewing;
+  $('#fTime').value = src.at_time || (t || draft ? '' : viewing === today() ? nextSlot() : '');
+  $('#fEnd').value = src.end_time || '';
+  $('#fRemind').value = String(src.remind_before || 0);
+  $('#fNotes').value = src.notes || '';
+  $('#fTag').value = src.tag || '';
   $('#tagList').innerHTML = S.tags.map(g => `<option value="${esc(g.name)}">`).join('');
-  $('#fDelete').hidden = !t;
+  $('#fDelete').hidden = $('#fDup').hidden = !t;
   $('#editErr').hidden = true;
   paintEdit();
   $('#edit').showModal();
@@ -541,20 +702,27 @@ function openEdit(t) {
 }
 $('#fab').onclick = () => openEdit(null);
 $('#fCancel').onclick = () => $('#edit').close();
+$('#fDup').onclick = () => { const t = E.task; $('#edit').close(); openEdit(null, { ...t, title: t.title }); };
 $('#editForm').onsubmit = e => {
   e.preventDefault();
+  const timed = !!$('#fTime').value;
   const body = { title: $('#fTitle').value, daily: E.kind === 'daily', days: E.days, on_date: $('#fDate').value,
-    at_time: $('#fTime').value || null, tag: $('#fTag').value };
+    at_time: $('#fTime').value || null, end_time: timed ? $('#fEnd').value || null : null,
+    remind_before: timed ? +$('#fRemind').value : 0, notes: $('#fNotes').value, tag: $('#fTag').value };
+  const fail = m => { $('#editErr').textContent = m; $('#editErr').hidden = false; };
+  if (!E.task && !body.daily && body.on_date === today() && body.at_time && body.at_time <= nowHM()) {
+    return fail(`${fmtTime(body.at_time)} has already passed today (it’s ${fmtTime(nowHM())} IST).`);
+  }
   busy($('#fSave'), async () => {
     try {
       await api(E.task ? `/api/task/${E.task.id}` : '/api/task', body);
     } catch (err) {
       if (err.status === 401) throw err;
-      $('#editErr').textContent = err.message; $('#editErr').hidden = false;
-      return;
+      return fail(err.message);
     }
     $('#edit').close();
-    toast(E.task ? 'Saved' : 'Added');
+    if (E.fromAdd) AF.title = '';   // it came from the add form: that draft is done
+    toast(E.task ? 'Saved' : `Added: ${body.title.trim()}`);
     await refresh(true);
   });
 };

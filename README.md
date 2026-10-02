@@ -71,7 +71,9 @@ on `127.0.0.1:SCHEDULE_PORT` (8096) behind nginx.
 
 Set `SCHEDULE_PIN` (6+ characters) in `.env`. Push needs HTTPS (or localhost).
 
-**Accounts:** the admin logs in as `admin` with `SCHEDULE_PIN`. Everyone else
+**Accounts:** the admin first logs in as `admin` with `SCHEDULE_PIN`, then sets
+their own name and password in Settings → Account (the PIN stops working).
+Old accounts without a login get a claim link from People. Everyone else
 joins through an invite link the admin makes in Settings → People (one use,
 7 days), picking their own name and password. Each person has a private
 schedule, and reminders go only to their own phones. The admin sees who has
@@ -81,15 +83,13 @@ joined and can disable an account, but never sees anyone's tasks.
 the Creator OS sheet), Upcoming (one-time tasks by date, filter by tag),
 Settings (reminders, install, tags, timezone).
 
-**Adding:** the + button opens a form (one time or repeating on chosen days,
-time, tag). Or type on Today:
+**Adding:** the form on Today has real pickers: one time (date) or repeats
+(weekday chips), start time in IST, tag. More options adds an end time (a
+10:00–12:00 block), an early reminder (5–60 min before) and notes.
 
-| You type | Result |
-|---|---|
-| `call mom 6pm` | today at 6 PM (tomorrow if 6 PM has passed) |
-| `dentist tomorrow 10:30 #health` | dated, timed and tagged |
-| `pay rent 5 oct` | on that date, no reminder |
-| `gym 7am #daily` | repeats every day at 7 |
+**Panel-only:** a live IST clock and a now line through today, Now / Next /
+Missed per block, ticking off a past day you forgot, a history of every tick,
+and a Stats tab (completion, streak, per-tag and per-routine consistency).
 
 **Reminders:** Settings → Turn on reminders on each phone. Every notification
 has ✅ Done and ⏰ 10 min. On Android, install the panel from Chrome's menu

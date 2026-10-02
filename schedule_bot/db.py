@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS invite (
     expires_at TEXT NOT NULL,          -- UTC ISO
     used_by    INTEGER REFERENCES user(user_id)
 );
+
+-- Every tick, one row per task per day. task.done_on only remembers the
+-- latest day, which can't say whether last Tuesday's gym happened.
+CREATE TABLE IF NOT EXISTS done_log (
+    task_id INTEGER NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES user(user_id),
+    day     TEXT NOT NULL,             -- YYYY-MM-DD, user's timezone
+    PRIMARY KEY (task_id, day)
+);
+CREATE INDEX IF NOT EXISTS done_log_user_day ON done_log(user_id, day);
 """
 
 # Columns added after the first release, applied to old and new databases alike.
@@ -75,12 +85,16 @@ _LATER_COLUMNS = [
     ("user", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
     ("user", "disabled", "INTEGER NOT NULL DEFAULT 0"),
     ("push_sub", "user_id", "INTEGER REFERENCES user(user_id)"),  # whose reminders
+    ("invite", "claim_user", "INTEGER REFERENCES user(user_id)"),  # hand over this account
+    ("task", "end_time", "TEXT"),                       # HH:MM; NULL = a moment, not a block
+    ("task", "remind_before", "INTEGER NOT NULL DEFAULT 0"),   # minutes early
+    ("task", "notes", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 EVERY_DAY = 127
 
 _EDITABLE = {"title", "tag_id", "daily", "on_date", "at_time", "done_on",
-             "reminded_on", "snooze_until", "days"}
+             "reminded_on", "snooze_until", "days", "end_time", "remind_before", "notes"}
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -101,6 +115,9 @@ def init(conn: sqlite3.Connection) -> None:
     # ALTER can't add UNIQUE, an index can. Partial: many users have no name yet.
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS user_name ON user(name COLLATE NOCASE)"
                  " WHERE name IS NOT NULL")
+    # Ticks from before the log existed: their one known day.
+    conn.execute("INSERT OR IGNORE INTO done_log (task_id, user_id, day)"
+                 " SELECT id, user_id, done_on FROM task WHERE done_on IS NOT NULL")
     conn.commit()
 
 
@@ -142,11 +159,13 @@ _SELECT = ("SELECT t.*, g.name AS tag_name FROM task t"
 
 
 def add_task(conn, user_id: int, title: str, tag_id: int | None, daily: bool,
-             on_date, at_time: str | None, days: int = EVERY_DAY) -> int:
+             on_date, at_time: str | None, days: int = EVERY_DAY, end_time: str | None = None,
+             remind_before: int = 0, notes: str = "") -> int:
     cur = conn.execute(
-        "INSERT INTO task (user_id, title, tag_id, daily, on_date, at_time, days, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, title, tag_id, int(daily), _iso(on_date), at_time, days, _now()))
+        "INSERT INTO task (user_id, title, tag_id, daily, on_date, at_time, days, end_time,"
+        " remind_before, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, title, tag_id, int(daily), _iso(on_date), at_time, days, end_time,
+         remind_before, notes, _now()))
     conn.commit()
     return cur.lastrowid
 
@@ -167,6 +186,22 @@ def update_task(conn, user_id: int, task_id: int, **fields) -> bool:
                        (*map(_iso, fields.values()), task_id, user_id))
     conn.commit()
     return cur.rowcount > 0
+
+
+def log_done(conn, user_id: int, task_id: int, day, done: bool) -> None:
+    if done:
+        conn.execute("INSERT OR IGNORE INTO done_log (task_id, user_id, day) VALUES (?, ?, ?)",
+                     (task_id, user_id, _iso(day)))
+    else:
+        conn.execute("DELETE FROM done_log WHERE task_id = ? AND user_id = ? AND day = ?",
+                     (task_id, user_id, _iso(day)))
+    conn.commit()
+
+
+def done_days(conn, user_id: int, since):
+    """(task_id, day) for every tick since a date: history and stats."""
+    return conn.execute("SELECT task_id, day FROM done_log WHERE user_id = ? AND day >= ?"
+                        " ORDER BY day", (user_id, _iso(since))).fetchall()
 
 
 def delete_task(conn, user_id: int, task_id: int) -> bool:
@@ -329,8 +364,9 @@ def task_owner(conn, task_id: int) -> int | None:
 
 def make_admin(conn, user_id: int, name: str) -> None:
     conn.execute("INSERT OR IGNORE INTO user (user_id, created_at) VALUES (?, ?)", (user_id, _now()))
-    conn.execute("UPDATE user SET is_admin = 1, name = ?, disabled = 0 WHERE user_id = ?",
-                 (name, user_id))
+    # COALESCE: an admin who picked their own name keeps it across restarts
+    conn.execute("UPDATE user SET is_admin = 1, name = COALESCE(name, ?), disabled = 0"
+                 " WHERE user_id = ?", (name, user_id))
     conn.commit()
 
 
@@ -367,6 +403,25 @@ def people(conn):
         " FROM user u WHERE u.name IS NOT NULL ORDER BY u.is_admin DESC, u.created_at").fetchall()
 
 
+def unclaimed(conn):
+    """Accounts with data but no login yet (from the Telegram days), waiting
+    for their owner to take them over through a claim link."""
+    return conn.execute(
+        "SELECT u.user_id, u.created_at,"
+        " (SELECT COUNT(*) FROM task t WHERE t.user_id = u.user_id) AS tasks"
+        " FROM user u WHERE u.name IS NULL AND u.is_admin = 0 AND u.disabled = 0"
+        " ORDER BY u.created_at").fetchall()
+
+
+def rename_user(conn, user_id: int, name: str) -> bool:
+    try:
+        cur = conn.execute("UPDATE user SET name = ? WHERE user_id = ?", (name.strip(), user_id))
+    except sqlite3.IntegrityError:   # taken
+        return False
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def active_users(conn):
     return conn.execute("SELECT * FROM user WHERE disabled = 0").fetchall()
 
@@ -388,9 +443,9 @@ def drop_session(conn, token_hash: str) -> None:
     conn.commit()
 
 
-def add_invite(conn, token: str, label: str, expires_at: str) -> None:
-    conn.execute("INSERT INTO invite (token, label, created_at, expires_at) VALUES (?, ?, ?, ?)",
-                 (token, label, _now(), expires_at))
+def add_invite(conn, token: str, label: str, expires_at: str, claim_user: int | None = None) -> None:
+    conn.execute("INSERT INTO invite (token, label, created_at, expires_at, claim_user)"
+                 " VALUES (?, ?, ?, ?, ?)", (token, label, _now(), expires_at, claim_user))
     conn.commit()
 
 
@@ -401,22 +456,33 @@ def open_invite(conn, token: str):
 
 
 def join(conn, token: str, name: str, pw_hash: str, tz: str = "Asia/Kolkata") -> int | None:
-    """Spend the invite and create the account, all or nothing. None: the
-    invite is gone/used/expired, or the name is taken."""
+    """Spend the invite and create the account, all or nothing. A claim
+    invite instead puts the login on its existing, still-unclaimed account.
+    None: the invite is gone/used/expired, the account was already claimed,
+    or the name is taken."""
     # Write lock first, so two people opening the same link at once can't
     # both pass the "still unused?" check.
     conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        if not conn.execute("SELECT 1 FROM invite WHERE token = ? AND used_by IS NULL"
-                            " AND expires_at > ?", (token, _now())).fetchone():
+        inv = conn.execute("SELECT * FROM invite WHERE token = ? AND used_by IS NULL"
+                           " AND expires_at > ?", (token, _now())).fetchone()
+        if not inv:
             conn.rollback()
             return None
-        cur = conn.execute("INSERT INTO user (tz, created_at, name, pw_hash) VALUES (?, ?, ?, ?)",
-                           (tz, _now(), name.strip(), pw_hash))
-        conn.execute("UPDATE invite SET used_by = ? WHERE token = ?", (cur.lastrowid, token))
+        if inv["claim_user"]:
+            uid = inv["claim_user"]
+            cur = conn.execute("UPDATE user SET name = ?, pw_hash = ? WHERE user_id = ?"
+                               " AND name IS NULL AND is_admin = 0", (name.strip(), pw_hash, uid))
+            if not cur.rowcount:      # claimed already, through another link
+                conn.rollback()
+                return None
+        else:
+            uid = conn.execute("INSERT INTO user (tz, created_at, name, pw_hash) VALUES (?, ?, ?, ?)",
+                               (tz, _now(), name.strip(), pw_hash)).lastrowid
+        conn.execute("UPDATE invite SET used_by = ? WHERE token = ?", (uid, token))
         conn.commit()
-        return cur.lastrowid
+        return uid
     except sqlite3.IntegrityError:   # name taken
         conn.rollback()
         return None

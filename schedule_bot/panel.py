@@ -47,6 +47,7 @@ STATIC = {  # path -> (file, content type)
 TICK_SECONDS = 20
 HISTORY_DAYS = 60            # done one-offs older than this stay out of the panel
 SNOOZES = (10, 30, 60)
+REMIND_BEFORE = (0, 5, 10, 15, 30, 60)   # minutes; the form offers these
 INVITE_DAYS = 7
 SESSION_MAX_AGE = 365 * 86400
 PW_ITERATIONS = 200_000
@@ -92,19 +93,25 @@ def new_session(conn, user_id: int) -> str:
     return token
 
 
+def pin_ok(password: str) -> bool:
+    return bool(AUTH["pin"]) and hmac.compare_digest(password.encode(), AUTH["pin"].encode())
+
+
 def check_login(conn, name: str, password: str):
-    """The user row, or None. The admin's password is the env PIN; a blank
-    name also means the admin, so the old one-field PIN login still works."""
+    """The user row, or None. Everyone logs in by name + password. Until the
+    admin sets their own password, "admin" (or a blank name) + SCHEDULE_PIN
+    gets them in; after that the PIN no longer does."""
     name = " ".join(name.split())
-    if not name or name.lower() == AUTH["admin"].lower():
-        if hmac.compare_digest(password.encode(), AUTH["pin"].encode()):
-            return db.get_user(conn, CFG["admin_uid"])
-        return None
-    user = db.user_by_name(conn, name)
-    if user is None or user["disabled"]:
-        check_pw(password, hash_pw("x"))   # same work either way: no name probing by timing
-        return None
-    return user if check_pw(password, user["pw_hash"]) else None
+    user = db.user_by_name(conn, name) if name else None
+    if user is not None and user["pw_hash"]:
+        if user["disabled"]:
+            return None
+        return user if check_pw(password, user["pw_hash"]) else None
+    admin = db.get_user(conn, CFG["admin_uid"])
+    if (not name or name.lower() == AUTH["admin"].lower()) and admin and not admin["pw_hash"]:
+        return admin if pin_ok(password) else None
+    check_pw(password, hash_pw("x"))   # same work either way: no name probing by timing
+    return None
 
 
 def valid_password(pw: str) -> str:
@@ -116,8 +123,9 @@ def valid_password(pw: str) -> str:
 # --- shapes -----------------------------------------------------------------
 
 def task_json(t) -> dict:
-    return {k: t[k] for k in ("id", "title", "daily", "days", "on_date", "at_time",
-                              "done_on", "snooze_until")} | {"tag": t["tag_name"]}
+    return {k: t[k] for k in ("id", "title", "daily", "days", "on_date", "at_time", "end_time",
+                              "remind_before", "notes", "done_on", "snooze_until")} | {
+        "tag": t["tag_name"], "created": t["created_at"][:10]}   # stats skip days before it existed
 
 
 def state(conn, user) -> dict:
@@ -128,9 +136,11 @@ def state(conn, user) -> dict:
     return {
         "now": now.strftime("%Y-%m-%dT%H:%M"),
         "tz": user["tz"],
-        "me": {"name": user["name"], "admin": bool(user["is_admin"])},
+        "me": {"name": user["name"], "admin": bool(user["is_admin"]),
+               "has_password": bool(user["pw_hash"])},
         "routine": [task_json(t) for t in db.routine(conn, uid)],
         "tasks": [task_json(t) for t in db.one_offs(conn, uid, since)],
+        "log": [[r["task_id"], r["day"]] for r in db.done_days(conn, uid, since)],
         "tags": [{"id": g["id"], "name": g["name"], "open": g["open"]}
                  for g in db.list_tags(conn, uid)],
         "devices": len(db.subs(conn, uid)),
@@ -144,8 +154,10 @@ def admin_state(conn) -> dict:
         "people": [dict(p) for p in db.people(conn)],
         "invites": [{"token": i["token"], "label": i["label"], "created_at": i["created_at"],
                      "expires_at": i["expires_at"], "joined": i["joined_name"],
+                     "claim": i["claim_user"],
                      "expired": not i["used_by"] and i["expires_at"] <= now}
                     for i in db.invites(conn)],
+        "unclaimed": [dict(u) for u in db.unclaimed(conn)],
     }
 
 
@@ -184,8 +196,18 @@ def fields_from(conn, uid, b: dict, old=None) -> dict:
         dt.date.fromisoformat(on_date)  # 2026-02-31 raises ValueError
         f |= {"days": db.EVERY_DAY, "on_date": on_date}
 
+    end_time = b.get("end_time") or None
+    if end_time is not None:
+        if not _TIME.fullmatch(end_time) or not at_time or end_time <= at_time:
+            raise ValueError("The end time must come after the start time")
+    before = int(b.get("remind_before") or 0)
+    if before not in REMIND_BEFORE:
+        raise ValueError("Remind 0, 5, 10, 15, 30 or 60 minutes before")
+    f |= {"end_time": end_time, "remind_before": before,
+          "notes": str(b.get("notes") or "").strip()[:1000]}
+
     if old is not None:
-        moved = any(f[k] != old[k] for k in ("at_time", "on_date", "daily", "days"))
+        moved = any(f[k] != old[k] for k in ("at_time", "on_date", "daily", "days", "remind_before"))
         if moved:   # a new time is a new reminder: forget the old one went out
             f |= {"reminded_on": None, "snooze_until": None}
         if f["daily"] != old["daily"]:
@@ -246,6 +268,10 @@ def push_all(conn, user_id: int, payload: dict) -> bool | None:
 def reminder(conn, t) -> dict:
     tag = f" · {t['tag_name']}" if t["tag_name"] else ""
     when = parse.fmt_time(t["at_time"]) or "Now"
+    if t["end_time"]:
+        when += f" – {parse.fmt_time(t['end_time'])}"
+    if t["remind_before"] and not t["snooze_until"]:
+        when = f"In {t['remind_before']} min · {when}"
     return {"title": t["title"], "body": f"{when}{tag}", "id": t["id"],
             "sig": sign(conn, t["id"]), "kind": "reminder"}
 
@@ -281,9 +307,22 @@ def _reminder_loop():
 
 # --- actions shared by the panel and notification buttons -------------------
 
-def set_done(conn, uid, task_id: int, done: bool, today: dt.date) -> bool:
-    return db.update_task(conn, uid, task_id, snooze_until=None,
-                          done_on=today if done else None)
+def set_done(conn, uid, task_id: int, done: bool, day: dt.date, today: dt.date | None = None) -> bool:
+    """Tick (or untick) a task for `day`, which may be a past day you forgot.
+    A routine's done_on (what silences today's reminder) only follows today."""
+    t = db.get_task(conn, uid, task_id)
+    if t is None:
+        return False
+    today = today or day
+    if t["daily"]:
+        db.log_done(conn, uid, task_id, day, done)
+        if day == today:
+            db.update_task(conn, uid, task_id, snooze_until=None, done_on=today if done else None)
+        return True
+    # One-off: undoing clears the day it was actually ticked on.
+    logged = day if done else dt.date.fromisoformat(t["done_on"]) if t["done_on"] else day
+    db.log_done(conn, uid, task_id, logged, done)
+    return db.update_task(conn, uid, task_id, snooze_until=None, done_on=day if done else None)
 
 
 def snooze(conn, user, task_id: int, minutes: int) -> bool:
@@ -370,7 +409,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if m := re.fullmatch(r"/api/invite/([\w\-]{20,64})", path):
                 inv = db.open_invite(conn, m[1])
-                return self.send(200, {"label": inv["label"]}) if inv else \
+                claim = inv and inv["claim_user"] and conn.execute(
+                    "SELECT COUNT(*) FROM task WHERE user_id = ?", (inv["claim_user"],)).fetchone()[0]
+                return self.send(200, {"label": inv["label"], "claim_tasks": claim or 0}) if inv else \
                     self.send(404, {"error": "This invite link was already used or has expired."})
             user = self.user(conn)
             if user is None:
@@ -473,7 +514,7 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
     if path == "/api/task":
         f = fields_from(conn, uid, b)
         tid = db.add_task(conn, uid, f["title"], f["tag_id"], f["daily"], f["on_date"],
-                          f["at_time"], f["days"])
+                          f["at_time"], f["days"], f["end_time"], f["remind_before"], f["notes"])
         return 200, {"task": task_json(db.get_task(conn, uid, tid))}
 
     if m := re.fullmatch(r"/api/task/(\d+)(?:/(done|snooze|delete))?", path):
@@ -481,7 +522,10 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
         if old is None:
             return 404, {"error": "That task is gone"}
         if m[2] == "done":
-            set_done(conn, uid, old["id"], bool(b.get("done")), today)
+            day = dt.date.fromisoformat(str(b.get("day") or today))
+            if not today - dt.timedelta(days=HISTORY_DAYS) <= day <= today:
+                raise ValueError("You can tick today or a past day, not the future")
+            set_done(conn, uid, old["id"], bool(b.get("done")), day, today)
         elif m[2] == "snooze":
             snooze(conn, user, old["id"], int(b.get("minutes", 10)))
         elif m[2] == "delete":
@@ -526,12 +570,28 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
         db.set_tz(conn, uid, tz)
         return 200, {"ok": True}
 
-    if path == "/api/password":
-        if user["is_admin"]:
-            raise ValueError("The admin password is SCHEDULE_PIN on the server")
-        if not check_pw(str(b.get("current", "")), user["pw_hash"]):
+    if path == "/api/account":
+        # Proof first: the current password, or the PIN for an admin who has
+        # never set one. Then a new name and/or a new password.
+        current = str(b.get("current", ""))
+        if user["pw_hash"]:
+            ok = check_pw(current, user["pw_hash"])
+        else:
+            ok = bool(user["is_admin"]) and pin_ok(current)
+        if not ok:
             raise ValueError("Current password is wrong")
-        db.set_password(conn, uid, hash_pw(valid_password(str(b.get("new", "")))))
+        name = " ".join(str(b.get("name") or user["name"] or "").split())
+        new = str(b.get("new") or "")
+        if user["is_admin"] and not user["pw_hash"] and not new:
+            raise ValueError("Set a new password: the PIN stops working for admin once you do")
+        if name != user["name"]:
+            if not _NAME.fullmatch(name):
+                raise ValueError("Name: 2–32 letters, numbers, spaces, dots or dashes")
+            reserved = not user["is_admin"] and name.lower() == AUTH["admin"].lower()
+            if reserved or not db.rename_user(conn, uid, name):
+                raise ValueError("That name is taken")
+        if new:
+            db.set_password(conn, uid, hash_pw(valid_password(new)))
         return 200, {"ok": True}
 
     if path.startswith("/api/admin/"):
@@ -543,6 +603,15 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
 
 
 def admin_act(conn, path: str, b: dict) -> tuple[int, dict]:
+    if m := re.fullmatch(r"/api/admin/claim/(\d+)", path):
+        uid = int(m[1])
+        if not any(u["user_id"] == uid for u in db.unclaimed(conn)):
+            raise ValueError("That account already has a login")
+        token = secrets.token_urlsafe(24)
+        expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=INVITE_DAYS)
+        db.add_invite(conn, token, " ".join(str(b.get("label", "")).split())[:40],
+                      expires.isoformat(timespec="seconds"), claim_user=uid)
+        return 200, {"path": f"/join/{token}"}
     if path == "/api/admin/invite":
         token = secrets.token_urlsafe(24)
         expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=INVITE_DAYS)

@@ -38,11 +38,12 @@
   .top-in { max-width: 1100px; margin: 0 auto; padding: 8px 12px; display: flex; align-items: center; gap: 14px; min-height: 52px; }
   .top .tabs { display: none; }
   .clock { margin-left: auto; font-size: 12.5px; font-weight: 700; color: var(--muted); white-space: nowrap; }
-  @media (max-width: 480px) { .clock { display: none; } .bell { margin-left: auto; } }
+  .clock .tz { font-size: 10.5px; font-weight: 800; color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 1px 5px; margin-left: 2px; }
+  @media (max-width: 480px) { .clock .cd { display: none; } .bell { font-size: 0; padding: 6px; } .bell::before { content: "🔔"; font-size: 14px; } }
   html, body { overflow-x: hidden; }
   .bell { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--deep); background: var(--deep-soft); border-radius: 999px; padding: 4px 10px; text-decoration: none; white-space: nowrap; }
   main { max-width: 1100px; margin: 0 auto; padding: 16px 12px calc(var(--nav-h) + 96px + env(safe-area-inset-bottom)); }
-  .bottom { display: grid; grid-template-columns: repeat(4, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; background: var(--card); border-top: 1px solid var(--line); padding: 6px 6px calc(6px + env(safe-area-inset-bottom)); }
+  .bottom { display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; background: var(--card); border-top: 1px solid var(--line); padding: 6px 6px calc(6px + env(safe-area-inset-bottom)); }
   .bottom a { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 50px; text-decoration: none; font-size: 11.5px; font-weight: 700; color: var(--muted); border-radius: 12px; }
   .bottom svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   .bottom a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
@@ -63,8 +64,10 @@
   .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 12px; margin-bottom: 10px; }
   @media (min-width: 760px) { .card { padding: 16px; } }
   label { display: block; font-size: 12.5px; font-weight: 700; margin: 12px 0 5px; }
-  input, select { width: 100%; font: inherit; font-size: 16px; color: var(--ink); background: #fff; border: 1.5px solid var(--line); border-radius: 10px; padding: 9px 12px; outline: none; min-height: 42px; }
-  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  input, select, textarea { width: 100%; font: inherit; font-size: 16px; color: var(--ink); background: #fff; border: 1.5px solid var(--line); border-radius: 10px; padding: 9px 12px; outline: none; min-height: 42px; }
+  textarea { resize: vertical; min-height: 72px; line-height: 1.45; }
+  input:disabled, select:disabled { background: var(--soft); color: var(--muted); }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .b { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; border: 0; border-radius: 10px; padding: 8px 14px; font: inherit; font-weight: 700; font-size: 13.5px; cursor: pointer; text-decoration: none; background: var(--soft); color: var(--ink); white-space: nowrap; }
   .b.primary { background: var(--accent); color: #fff; }
   .b.warn { background: var(--bad-soft); color: var(--bad); }
@@ -89,9 +92,25 @@
   .note.warn { background: var(--deep-soft); color: var(--deep); font-weight: 600; }
   .note.ok { background: var(--ok-soft); color: var(--ok); font-weight: 600; }
 
-  /* quick add */
-  .quick { display: flex; gap: 8px; margin-bottom: 14px; }
-  .quick input { flex: 1; }
+  /* add form */
+  .add { padding: 10px; margin-bottom: 14px; }
+  .add-top { display: flex; gap: 8px; }
+  .add-top input { flex: 1; font-weight: 600; }
+  .add-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; align-items: end; }
+  .add-opts .seg, .add-opts .days { grid-column: 1 / -1; margin: 0; }
+  .add-opts .more { grid-column: 1 / -1; justify-self: start; }
+  @media (min-width: 760px) {
+    .add-opts { grid-template-columns: auto minmax(140px, 1fr) 130px minmax(120px, 1fr) auto; }
+    .add-opts .seg, .add-opts .days, .add-opts .more { grid-column: auto; }
+    .add-opts .days { min-width: 260px; }
+  }
+  .fld { margin: 0; font-size: 11.5px; color: var(--muted); }
+  .fld span { display: block; margin-bottom: 3px; }
+  .fld input { min-height: 38px; padding: 6px 10px; font-size: 15px; }
+  .seg.sm { margin: 0; padding: 3px; }
+  .seg.sm button { padding: 6px 8px; font-size: 12.5px; }
+  .days.sm button { padding: 7px 0; font-size: 12px; }
+  .add .hint { margin-top: 8px; }
 
   /* tiles */
   .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 6px; }
@@ -123,6 +142,10 @@
   .row .t2 { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-top: 2px; font-size: 12px; color: var(--muted); font-weight: 600; }
   .row .t2 svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
   .row .r { display: grid; justify-items: end; gap: 4px; }
+  .row .t3 { font-size: 12.5px; color: var(--muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
+  .nowline { display: flex; align-items: center; gap: 8px; color: var(--bad); font-size: 11.5px; font-weight: 800; margin: 2px 0; }
+  .nowline::before, .nowline::after { content: ""; height: 2px; background: var(--bad); flex: 1; border-radius: 1px; }
+  .nowline::before { flex: 0 0 10px; }
   .check { width: 40px; height: 40px; border-radius: 12px; border: 2px solid #cfcfc8; background: #fff; display: grid; place-items: center; cursor: pointer; padding: 0; }
   .check svg { width: 20px; height: 20px; stroke: #fff; fill: none; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; opacity: 0; }
   .check[aria-pressed="true"] { background: var(--ok); border-color: var(--ok); }
@@ -151,6 +174,23 @@
   .wi .wn { font-weight: 700; overflow-wrap: anywhere; line-height: 1.3; }
   .wi.done .wn { text-decoration: line-through; color: var(--muted); }
   @media (min-width: 1000px) { .wi { grid-template-columns: 1fr; gap: 0; } }
+
+  /* stats */
+  .bars { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; align-items: end; height: 170px; margin-top: 6px; }
+  .bars.many { gap: 2px; }
+  .barcol { display: grid; grid-template-rows: auto 1fr auto; height: 100%; text-decoration: none; text-align: center; gap: 4px; min-width: 0; }
+  .barcol .bv { font-size: 10.5px; font-weight: 700; color: var(--muted); white-space: nowrap; overflow: hidden; }
+  .bars.many .bv { visibility: hidden; }
+  .barcol .bt { background: var(--soft); border-radius: 6px; display: flex; align-items: flex-end; overflow: hidden; }
+  .barcol .bt i { display: block; width: 100%; background: var(--ok); border-radius: 6px 6px 0 0; }
+  .barcol .bt i.today { background: var(--accent); }
+  .barcol .bl { font-size: 11px; font-weight: 700; color: var(--muted); }
+  .mrow { display: grid; grid-template-columns: minmax(0, 1.2fr) 1fr 44px; gap: 10px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13.5px; }
+  .mrow:first-of-type { border-top: 0; }
+  .mrow .ml { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .mrow .mv { text-align: right; font-weight: 700; color: var(--muted); font-size: 12.5px; }
+  .meter { height: 8px; border-radius: 4px; background: var(--soft); overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--ok); }
 
   /* settings */
   .srow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
@@ -268,19 +308,35 @@
     </div>
     <div class="two">
       <div>
-        <label for="fTime">Time</label>
+        <label for="fTime">Starts (IST)</label>
         <input id="fTime" type="time">
+      </div>
+      <div>
+        <label for="fEnd">Ends <span class="muted">(optional)</span></label>
+        <input id="fEnd" type="time">
+      </div>
+    </div>
+    <p class="hint" id="timeHint">No time means no reminder: it shows under Anytime.</p>
+    <div class="two" id="remindRow">
+      <div>
+        <label for="fRemind">Remind me</label>
+        <select id="fRemind">
+          <option value="0">At the start</option><option value="5">5 min before</option>
+          <option value="10">10 min before</option><option value="15">15 min before</option>
+          <option value="30">30 min before</option><option value="60">1 hour before</option>
+        </select>
       </div>
       <div>
         <label for="fTag">Tag</label>
         <input id="fTag" list="tagList" autocomplete="off" placeholder="none">
-        <datalist id="tagList"></datalist>
       </div>
     </div>
-    <p class="hint" id="timeHint">No time means no reminder: it shows under Anytime.</p>
+    <label for="fNotes">Notes <span class="muted">(optional)</span></label>
+    <textarea id="fNotes" rows="3" maxlength="1000" placeholder="Checklist, link, script idea…"></textarea>
     <p class="err" id="editErr" hidden></p>
     <div class="acts fill" style="margin-top:18px">
       <button class="b warn" type="button" id="fDelete">Delete</button>
+      <button class="b line" type="button" id="fDup">Duplicate</button>
       <button class="b" type="button" id="fCancel">Cancel</button>
       <button class="b primary" type="submit" id="fSave">Save</button>
     </div>
@@ -296,6 +352,7 @@
   </div>
 </dialog>
 
+<datalist id="tagList"></datalist>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/panel.js"></script>
 </body>
