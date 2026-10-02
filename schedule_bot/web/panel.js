@@ -194,6 +194,7 @@ function render(force) {
   const [name, arg] = route();
   $('#clock').innerHTML = `<span class="cd">${fmtDate(today(), { weekday: 'short', day: 'numeric', month: 'short' })} · </span>${fmtTime(nowHM())} <span class="tz">${esc(tzLabel())}</span>`;
   $('#bell').hidden = pushOn || !pushSupported();
+  $('#fab').hidden = !['week', 'upcoming'].includes(name);   // Today has its own add form
   // never redraw under the user's fingers: typing or a dialog
   const typing = document.activeElement && $('#view').contains(document.activeElement) && /INPUT|SELECT/.test(document.activeElement.tagName);
   if (!force && (typing || $('#dlg').open || $('#edit').open)) return;
@@ -279,7 +280,7 @@ function dayView(date) {
       <div><h1>${esc(dayLabel(date))}</h1><p class="sub">${esc(sub)}</p></div>
       <div class="nav">
         <a class="b icon line" href="#day/${addDays(date, -1)}" aria-label="Previous day">${svg('prev')}</a>
-        ${isToday ? '' : '<a class="b line" href="#today">Today</a>'}
+        <a class="b line ${isToday ? 'gap' : ''}" href="#today" ${isToday ? 'tabindex="-1" aria-hidden="true"' : ''}>Today</a>
         <a class="b icon line" href="#day/${addDays(date, 1)}" aria-label="Next day">${svg('next')}</a>
       </div>
     </div>
@@ -376,7 +377,7 @@ function weekView(start) {
       <div><h1>${start === addDays(t, -wd(t)) ? 'This week' : 'Week'}</h1><p class="sub">${esc(span)}</p></div>
       <div class="nav">
         <a class="b icon line" href="#week/${addDays(start, -7)}" aria-label="Previous week">${svg('prev')}</a>
-        <a class="b line" href="#week">This week</a>
+        <a class="b line ${start === addDays(t, -wd(t)) ? 'gap' : ''}" href="#week">This week</a>
         <a class="b icon line" href="#week/${addDays(start, 7)}" aria-label="Next week">${svg('next')}</a>
       </div>
     </div>
