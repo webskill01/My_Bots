@@ -17,5 +17,17 @@ module.exports = {
     restart_delay: 5000,
     max_memory_restart: "300M",
     env: { PYTHONUNBUFFERED: "1" },  // otherwise pm2 logs lag behind
+  }, {
+    name: "schedule-panel",          // web panel + push reminders, 127.0.0.1:8096
+    cwd: "/opt/my-bots",
+    script: "/opt/my-bots/.venv/bin/python",
+    args: "-m schedule_bot",
+    interpreter: "none",
+    instances: 1,                    // reminder thread lives in-process: never cluster
+    exec_mode: "fork",
+    autorestart: true,
+    restart_delay: 5000,
+    max_memory_restart: "300M",
+    env: { PYTHONUNBUFFERED: "1" },
   }],
 };

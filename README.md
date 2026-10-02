@@ -59,3 +59,35 @@ sees anyone else's entries.
 ```
 pytest -q
 ```
+
+---
+
+# Schedule Panel
+
+A web panel for a daily routine and one-time tasks, with reminders as phone
+notifications (Web Push) at each task's time. Lives at
+https://schedule.easebuilds.in. Run with `python -m schedule_bot`; it serves
+on `127.0.0.1:SCHEDULE_PORT` (8096) behind nginx.
+
+Set `SCHEDULE_PIN` (6+ digits) in `.env`. Push needs HTTPS (or localhost).
+
+**Screens:** Today (Now / Next, main goal, tick-off list), Week (Mon–Sun like
+the Creator OS sheet), Upcoming (one-time tasks by date, filter by tag),
+Settings (reminders, install, tags, timezone).
+
+**Adding:** the + button opens a form (one time or repeating on chosen days,
+time, tag). Or type on Today:
+
+| You type | Result |
+|---|---|
+| `call mom 6pm` | today at 6 PM (tomorrow if 6 PM has passed) |
+| `dentist tomorrow 10:30 #health` | dated, timed and tagged |
+| `pay rent 5 oct` | on that date, no reminder |
+| `gym 7am #daily` | repeats every day at 7 |
+
+**Reminders:** Settings → Turn on reminders on each phone. Every notification
+has ✅ Done and ⏰ 10 min. On Android, install the panel from Chrome's menu
+(Add to Home screen). iPhone needs iOS 16.4+ and the installed app.
+
+Missed while the server was down: one-time reminders still go out when it's
+back; routine ones only if under 15 minutes late.
