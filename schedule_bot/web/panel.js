@@ -99,6 +99,64 @@ const canTick = (t, date) => !t.daily || date <= today();
 const overdue = () => S.tasks.filter(t => !t.done_on && t.on_date < today()).sort((a, b) => a.on_date.localeCompare(b.on_date) || byTime(a, b));
 const findTask = id => S.routine.find(t => t.id === id) || S.tasks.find(t => t.id === id);
 
+// ---- visuals. Animated values start where they were last drawn, so the
+// minute redraw stays still and only real changes move.
+const SEEN = {};
+const pct = (a, b) => (b ? Math.round(a * 100 / b) : 0);
+const anim = (k, v) => `data-k="${k}" data-to="${v}" style="--v:${SEEN[k] ?? 0}"`;
+const firstSee = k => !(k in SEEN) && (SEEN[k] = 1);
+const calm = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+let popKey = '', celebrate = false;   // the task just ticked; a tick worth confetti
+function animate() {
+  const els = $$('#view [data-k]');
+  void document.body.offsetWidth;   // commit the start values first
+  els.forEach(el => {
+    const from = +(SEEN[el.dataset.k] ?? 0), to = +el.dataset.to;
+    el.style.setProperty('--v', to); SEEN[el.dataset.k] = to;
+    if (el.classList.contains('num') && from !== to && !calm()) countTo(el, from, to);
+  });
+}
+function countTo(el, from, to) {
+  const t0 = performance.now();
+  const step = now => { const p = Math.min(1, (now - t0) / 900); el.textContent = Math.round(from + (to - from) * (1 - (1 - p) ** 3)); if (p < 1) requestAnimationFrame(step); };
+  el.textContent = from; requestAnimationFrame(step);
+}
+const ring = (k, p, size = '') => `<div class="ring ${size}"><svg viewBox="0 0 36 36" aria-hidden="true"><circle class="rb" cx="18" cy="18" r="15.9"/>
+  <circle class="rv ${p ? '' : 'zero'}" cx="18" cy="18" r="15.9" pathLength="100" ${anim(k, p)}/></svg><div class="rn"><b class="num" ${anim(k + 'n', p)}>${p}</b><small>%</small></div></div>`;
+// [state, count, label, show even at 0]
+const legend = parts => `<div class="legend">${parts.filter(x => x[1] || x[3]).map(([c, n, l]) => `<span><i class="st-${c}"></i><b>${n}</b> ${l}</span>`).join('')}</div>`;
+
+// the day's timed blocks laid out on a clock, overlaps in up to 3 lanes
+function timeline(timed, state, hm, isToday) {
+  if (!timed.length) return '';
+  const s = i => mins(i.at_time), e = i => (i.end_time > i.at_time ? mins(i.end_time) : s(i) + 30);
+  let a = Math.min(...timed.map(s)), b = Math.max(...timed.map(e));
+  if (isToday) { a = Math.min(a, mins(hm)); b = Math.max(b, mins(hm) + 1); }
+  a = Math.floor(a / 60) * 60; b = Math.max(a + 180, Math.ceil(b / 60) * 60);
+  const x = m => `${((m - a) * 100 / (b - a)).toFixed(2)}%`;
+  const lanes = [];
+  const blocks = timed.map(i => {
+    let l = lanes.findIndex(end => end <= s(i));
+    if (l < 0) l = Math.min(lanes.length, 2);
+    lanes[l] = Math.max(lanes[l] || 0, e(i));
+    return `<i class="st-${state(i)}" data-open="${i.id}" title="${esc(`${fmtTime(i.at_time)} · ${i.title}`)}" style="left:${x(s(i))};width:${x(e(i) - s(i) + a)};--l:${l}"></i>`;
+  });
+  const step = b - a > 720 ? 180 : b - a > 360 ? 120 : 60, ticks = [];
+  for (let m = a; m <= b; m += step) { const h = m / 60 % 24; ticks.push(`<span style="left:${x(m)}">${h % 12 || 12}${h < 12 ? 'a' : 'p'}</span>`); }
+  return `<div class="tl tk-full" aria-hidden="true"><div class="tl-track" style="--lanes:${lanes.length}">${blocks.join('')}
+    ${isToday ? `<b class="tl-now" style="left:${x(mins(hm))}"></b>` : ''}</div><div class="tl-ticks">${ticks.join('')}</div></div>`;
+}
+
+function burst() {
+  if (calm()) return;
+  const box = document.createElement('div');
+  box.className = 'confetti'; box.setAttribute('aria-hidden', 'true');
+  const r = n => (Math.random() * 2 - 1) * n;
+  box.innerHTML = [...Array(40)].map(() => `<i style="--c:${PALETTE[Math.random() * PALETTE.length | 0]};--dx:${r(45)}vw;--dy:${r(30) + 15}vh;--r:${r(720)}deg"></i>`).join('');
+  document.body.append(box);
+  setTimeout(() => box.remove(), 1600);
+}
+
 function tagHtml(t) { return t.tag ? `<span class="tag" style="--tc:${tc(t.tag)}">${esc(t.tag)}</span>` : ''; }
 
 function row(t, date, badges = '', cur = false) {
@@ -110,11 +168,12 @@ function row(t, date, badges = '', cur = false) {
     !t.daily && t.on_date !== date ? `<span>${esc(fmtDate(t.on_date, { day: 'numeric', month: 'short' }))}</span>` : '',
     t.at_time && t.remind_before ? `<span>${svg('bell')} ${t.remind_before} min early</span>` : ''].filter(Boolean).join('');
   const note = (t.notes || '').split('\n')[0];
-  return `<div class="row ${done ? 'done' : ''} ${cur ? 'cur' : ''}" data-open="${t.id}" style="--tc:${tc(t.tag)}">
+  const prog = cur && t.end_time > t.at_time ? `<i class="prog" style="width:${pct(mins(nowHM()) - mins(t.at_time), mins(t.end_time) - mins(t.at_time))}%"></i>` : '';
+  return `<div class="row ${done ? 'done' : ''} ${cur ? 'cur' : ''} ${popKey === t.id + '|' + date ? 'pop' : ''}" data-open="${t.id}" style="--tc:${tc(t.tag)}">
     <button class="check" type="button" data-done="${t.id}" data-date="${date}" aria-pressed="${done}" aria-label="${done ? 'Mark not done' : 'Mark done'}: ${esc(t.title)}" ${canTick(t, date) ? '' : 'disabled'}>${svg('check')}</button>
     <div class="tm">${t.at_time ? fmtTime(t.at_time).replace(' ', '<small>') + '</small>' : '<small>Anytime</small>'}</div>
     <div style="min-width:0"><div class="t1">${esc(t.title)}</div>${meta ? `<div class="t2">${meta}</div>` : ''}${note ? `<div class="t3">${esc(note)}</div>` : ''}</div>
-    <div class="r">${badges}${snz}</div></div>`;
+    <div class="r">${badges}${snz}</div>${prog}</div>`;
 }
 
 function wireRows() {
@@ -124,6 +183,8 @@ function wireRows() {
     const day = t.daily ? b.dataset.date : today();   // a one-off is done when you do it
     busy(b, async () => {
       await api(`/api/task/${t.id}/done`, { done, day });
+      popKey = t.id + '|' + b.dataset.date; clearTimeout(wireRows.t); wireRows.t = setTimeout(() => (popKey = ''), 900);
+      celebrate = done && route()[0] !== 'upcoming';
       // instant feedback; the refresh confirms
       if (t.daily) LOG()[done ? 'add' : 'delete'](t.id + '|' + day); else t.done_on = done ? day : null;
       render(true);
@@ -199,6 +260,7 @@ function render(force) {
   if (!force && (typing || $('#dlg').open || $('#edit').open)) return;
   const y = window.scrollY;
   VIEWS[name](...arg);
+  animate();
   if (!force) window.scrollTo(0, y);
 }
 window.addEventListener('hashchange', () => {
@@ -256,6 +318,7 @@ function dayView(date) {
   } else if (past) {
     timed.forEach(i => { if (!isDone(i, date)) missed.add(i); });
   }
+  const state = i => (isDone(i, date) ? 'done' : missed.has(i) ? 'miss' : i === cur ? 'now' : 'todo');
   const goal = items.find(i => i.tag === 'goal');
   const late = isToday ? overdue() : [];
 
@@ -283,11 +346,10 @@ function dayView(date) {
         <a class="b icon line" href="#day/${addDays(date, 1)}" aria-label="Next day">${svg('next')}</a>
       </div>
     </div>
+    ${trackerHtml(date, items, timed, state, hm, isToday, past)}
     ${addFormHtml(t)}
     <div class="tiles">
       ${goal ? `<div class="tile goal"><div class="l">Main goal</div><div class="v txt">${esc(goal.title.replace(/^🎯\s*(Goal:\s*)?/, ''))}</div></div>` : ''}
-      <div class="tile"><div class="l">${past ? 'Got done' : 'Done'}</div><div class="v">${done}<span class="muted" style="font-size:15px"> / ${items.length}</span></div>
-        <div class="bar"><i style="width:${items.length ? Math.round(done * 100 / items.length) : 0}%"></i></div></div>
       ${isToday ? `<div class="tile"><div class="l">${cur ? 'Now' : 'Next'}</div>${(cur || next)
         ? `<div class="v txt">${esc((cur || next).title)}</div><div class="s">${cur
           ? (cur.end_time ? `until ${fmtTime(cur.end_time)} · ${inText(mins(cur.end_time) - mins(hm))} left` : `since ${fmtTime(cur.at_time)}`)
@@ -303,6 +365,24 @@ function dayView(date) {
       <div class="list">${anytime.map(i => row(i, date)).join('')}</div>` : ''}`;
   wireRows();
   wireAddForm(t);
+  if (celebrate) { celebrate = false; if (items.length && done === items.length) { burst(); toast('Everything done. Great day! 🎉'); } }
+}
+
+function trackerHtml(date, items, timed, state, hm, isToday, past) {
+  if (!items.length) return '';
+  const n = { done: 0, miss: 0, now: 0, todo: 0 };
+  items.forEach(i => n[state(i)]++);
+  const p = pct(n.done, items.length), left = n.todo + n.now;
+  const mood = past ? `You got ${n.done} of ${items.length} done` : p === 100 ? 'All done. Great day! 🎉'
+    : p >= 50 ? `${left} to go, keep it up` : n.done ? 'Good start, keep going' : 'Let’s get the first one done';
+  const what = i => `${i.at_time ? fmtTime(i.at_time) + ' · ' : ''}${i.title} · ${{ done: 'done', miss: 'missed', now: 'now', todo: 'to do' }[state(i)]}`;
+  return `<div class="card tracker">
+    ${ring('r' + date, p)}
+    <div class="tk-head"><b>${esc(mood)}</b>${legend([['done', n.done, 'done', 1], ['todo', left, past ? 'not done' : 'to do', 1], ['miss', n.miss, 'missed']])}</div>
+    <div class="segs tk-full ${firstSee('segs' + date) ? 'intro' : ''}" aria-hidden="true">${items.map((i, k) =>
+      `<i class="st-${state(i)} ${popKey === i.id + '|' + date ? 'pop' : ''}" data-open="${i.id}" title="${esc(what(i))}" style="--i:${k}"></i>`).join('')}</div>
+    ${timeline(timed, state, hm, isToday)}
+  </div>`;
 }
 
 // ---- the add form: real pickers, no text to parse ----
@@ -371,6 +451,9 @@ function weekView(start) {
   const same = D(start).getUTCMonth() === D(end).getUTCMonth();
   const span = `${fmtDate(start, { day: 'numeric', ...(same ? {} : { month: 'short' }) })} – ${fmtDate(end, { day: 'numeric', month: 'short' })}`;
   const days = [...Array(7)].map((_, i) => addDays(start, i));
+  let wAll = 0, wDone = 0, wMiss = 0;
+  days.forEach(d => itemsOn(d).forEach(i => { wAll++; if (isDone(i, d)) wDone++; else if (d < t && i.created <= d) wMiss++; }));
+  const k = 'wk' + start;
   $('#view').innerHTML = `
     <div class="head">
       <div><h1>${start === addDays(t, -wd(t)) ? 'This week' : 'Week'}</h1><p class="sub">${esc(span)}</p></div>
@@ -380,12 +463,15 @@ function weekView(start) {
         <a class="b icon line" href="#week/${addDays(start, 7)}" aria-label="Next week">${svg('next')}</a>
       </div>
     </div>
-    <div class="week">${days.map(d => `
+    ${wAll ? `<div class="card wk-sum">${legend([['done', wDone, 'done', 1], ['miss', wMiss, 'missed'], ['todo', wAll - wDone - wMiss, 'still to do', 1]])}
+      <div class="split3"><i class="st-done" ${anim(k + 'd', pct(wDone, wAll))}></i><i class="st-miss" ${anim(k + 'm', pct(wMiss, wAll))}></i></div></div>` : ''}
+    <div class="week">${days.map(d => { const its = itemsOn(d), dn = its.filter(i => isDone(i, d)).length; return `
       <section class="wd ${d === t ? 'today' : ''}">
-        <a class="day-t" href="#day/${d}"><b>${DAYS[wd(d)]}</b><span>${fmtDate(d, { day: 'numeric', month: 'short' })}${d === t ? ' · today' : ''}</span></a>
+        <div class="wd-h"><a class="day-t" href="#day/${d}"><b>${DAYS[wd(d)]}</b><span>${fmtDate(d, { day: 'numeric', month: 'short' })}${d === t ? ' · today' : ''}</span></a>
+          ${its.length ? `<span class="wc">${dn}/${its.length}</span>${ring('w' + d, pct(dn, its.length), 'xs')}` : ''}</div>
         ${itemsOn(d).map(i => `<div class="wi ${isDone(i, d) ? 'done' : ''}" data-open="${i.id}" style="--tc:${tc(i.tag)}" tabindex="0">
           <span class="wt">${i.at_time ? fmtTime(i.at_time) : 'Anytime'}</span><span class="wn">${esc(i.title)}</span></div>`).join('') || '<p class="muted small">Free</p>'}
-      </section>`).join('')}</div>`;
+      </section>`; }).join('')}</div>`;
   $$('[data-open]').forEach(r => { r.onclick = () => openEdit(findTask(+r.dataset.open)); r.onkeydown = e => { if (e.key === 'Enter') r.click(); }; });
 }
 
@@ -422,7 +508,6 @@ function upcomingView() {
 
 // ---- Stats: built from the tick log ----
 let statDays = 7;
-const pct = (a, b) => (b ? Math.round(a * 100 / b) : 0);
 function statsView() {
   const t = today();
   const days = [...Array(statDays)].map((_, i) => addDays(t, i - statDays + 1));
@@ -445,24 +530,25 @@ function statsView() {
   const tags = Object.entries(byTag).sort((a, b) => b[1].total - a[1].total);
   const tasks = Object.values(byTask).sort((a, b) => pct(a.done, a.total) - pct(b.done, b.total) || b.total - a.total);
   const best = perDay.filter(x => x.total).sort((a, b) => pct(b.done, b.total) - pct(a.done, a.total))[0];
-  const meter = (a, b, color) => `<div class="meter"><i style="width:${pct(a, b)}%;${color ? `background:${color}` : ''}"></i></div>`;
+  const meter = (k, a, b, color) => `<div class="meter" style="--tc:${color}"><i ${anim(`m${statDays}${k}`, pct(a, b))}></i></div>`;
+  const M = Math.max(1, ...perDay.map(x => x.total));   // bar height = how much was on that day
 
   $('#view').innerHTML = `
     <div class="head"><div><h1>Stats</h1><p class="sub">From what you ticked off. IST days.</p></div>
       <div class="chips" style="margin:0" role="group" aria-label="Range">${[7, 30].map(n => `<button class="chip" data-range="${n}" aria-pressed="${statDays === n}">${n} days</button>`).join('')}</div></div>
     <div class="tiles">
-      <div class="tile"><div class="l">Done</div><div class="v">${pct(done, total)}%</div><div class="s">${done} of ${total} tasks</div></div>
+      <div class="tile ringed">${ring('st' + statDays, pct(done, total), 'sm')}<div><div class="l">Done</div><div class="s">${done} of ${total} tasks</div></div></div>
       <div class="tile"><div class="l">Streak</div><div class="v">${streak}<span class="muted" style="font-size:15px"> day${streak === 1 ? '' : 's'}</span></div><div class="s">80%+ done each day</div></div>
       <div class="tile"><div class="l">Best day</div><div class="v txt">${best ? esc(dayLabel(best.d)) : '—'}</div><div class="s">${best ? `${best.done} of ${best.total} · ${pct(best.done, best.total)}%` : 'Nothing yet'}</div></div>
     </div>
-    <div class="card"><h2>Day by day</h2>
+    <div class="card"><h2>Day by day</h2>${legend([['done', done, 'done', 1], ['un', total - done, 'not done', 1]])}
       <div class="bars ${statDays > 7 ? 'many' : ''}">${perDay.map(x => `<a class="barcol" href="#day/${x.d}" title="${esc(dayLabel(x.d))}: ${x.done} of ${x.total}">
         <span class="bv">${x.total ? pct(x.done, x.total) + '%' : ''}</span>
-        <span class="bt"><i style="height:${pct(x.done, x.total)}%" class="${x.d === t ? 'today' : ''}"></i></span>
+        <span class="bt"><i class="st-un" ${anim(`su${statDays}${x.d}`, pct(x.total - x.done, M))}></i><i class="st-done ${x.d === t ? 'today' : ''}" ${anim(`sd${statDays}${x.d}`, pct(x.done, M))}></i></span>
         <span class="bl">${statDays > 7 ? D(x.d).getUTCDate() : DAYS[wd(x.d)].slice(0, 2)}</span></a>`).join('')}</div>
     </div>
-    ${tags.length ? `<div class="card"><h2>By tag</h2>${tags.map(([k, v]) => `<div class="mrow"><span class="ml"><span class="dot" style="--tc:${tc(k === 'untagged' ? '' : k)}"></span> ${esc(k)}</span>${meter(v.done, v.total, tc(k === 'untagged' ? '' : k))}<span class="mv">${v.done}/${v.total}</span></div>`).join('')}</div>` : ''}
-    ${tasks.length ? `<div class="card"><h2>Routine consistency</h2><p class="muted small" style="margin-bottom:8px">Lowest first: what keeps slipping.</p>${tasks.map(x => `<div class="mrow"><span class="ml">${esc(x.t.title)}${x.t.at_time ? ` <span class="muted">${fmtTime(x.t.at_time)}</span>` : ''}</span>${meter(x.done, x.total, tc(x.t.tag))}<span class="mv">${x.done}/${x.total}</span></div>`).join('')}</div>` : ''}
+    ${tags.length ? `<div class="card"><h2>By tag</h2>${tags.map(([k, v]) => `<div class="mrow"><span class="ml"><span class="dot" style="--tc:${tc(k === 'untagged' ? '' : k)}"></span> ${esc(k)}</span>${meter('g' + k, v.done, v.total, tc(k === 'untagged' ? '' : k))}<span class="mv">${v.done}/${v.total}</span></div>`).join('')}</div>` : ''}
+    ${tasks.length ? `<div class="card"><h2>Routine consistency</h2><p class="muted small" style="margin-bottom:8px">Lowest first: what keeps slipping.</p>${tasks.map(x => `<div class="mrow"><span class="ml">${esc(x.t.title)}${x.t.at_time ? ` <span class="muted">${fmtTime(x.t.at_time)}</span>` : ''}</span>${meter('t' + x.t.id, x.done, x.total, tc(x.t.tag))}<span class="mv">${x.done}/${x.total}</span></div>`).join('')}</div>` : ''}
     ${!total ? '<div class="empty">No history yet. Tick tasks off on Today and your stats build up here.</div>' : ''}`;
   $$('[data-range]').forEach(b => b.onclick = () => { statDays = +b.dataset.range; render(true); });
 }
