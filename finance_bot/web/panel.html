@@ -210,9 +210,9 @@
   .cd.lv4 { background: var(--spend); color: #fff; }
   .cd.today { box-shadow: 0 0 0 2px var(--accent); }
   .cd.future { opacity: .35; pointer-events: none; background: transparent; border: 1px dashed var(--line); }
-  .cd .ed { position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 1.5px #fff; }
   .cd:hover { filter: brightness(.96); }
-  @media (max-width: 599px) { .cd { padding: 4px; } .cd span { font-size: 9.5px; letter-spacing: -.02em; } .cd .ed { top: 4px; right: 4px; width: 6px; height: 6px; } }
+  @media (max-width: 599px) { .cd { padding: 4px 4px 9px; } .cd span { font-size: 9.5px; letter-spacing: -.02em; } }
+  @media (max-width: 360px) { .cd span { font-size: 8.5px; letter-spacing: -.04em; } .cd { padding-left: 3px; padding-right: 3px; } }
   @media (min-width: 600px) { .cd { min-height: 62px; padding: 7px 8px; } .cd span { font-size: 11.5px; } }
   .cal-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font-size: 12px; color: var(--muted); font-weight: 600; }
   .cal-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
@@ -254,6 +254,67 @@
   .rm:hover { background: var(--soft); color: var(--bad); }
   .f-total { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: var(--soft); font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .f-total:empty { display: none; }
+
+  /* the month card on Entries: name, totals, calendar; swipe to change month */
+  .month { padding: 12px 12px 10px; touch-action: pan-y; transition: transform .25s cubic-bezier(.2, .8, .2, 1); outline: none; }
+  @media (min-width: 600px) { .month { padding: 16px 18px 14px; } }
+  .m-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .m-name { flex: 1; min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+  .m-name h1 { font-size: 22px; }
+  .pill.now { background: var(--accent-soft); color: var(--accent); text-decoration: none; }
+  .chev { flex: none; width: 34px; height: 34px; display: grid; place-items: center; border: 1.5px solid var(--line); background: var(--card); border-radius: 10px; cursor: pointer; color: var(--ink); transition: background .15s, transform .15s; }
+  .chev:hover:not(:disabled) { background: var(--soft); }
+  .chev:active:not(:disabled) { transform: scale(.92); }
+  .chev:disabled { opacity: .3; cursor: default; }
+  .chev svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+  .swipe-hint { display: none; }
+  @media (hover: none) and (pointer: coarse) { .chev { display: none; } .swipe-hint { display: inline; } }
+  .m-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; }
+  .m-stats div { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 7px 9px; min-width: 0; }
+  .m-stats span { display: block; font-size: 11px; font-weight: 700; color: var(--muted); }
+  .m-stats b { display: block; font-size: 15.5px; font-weight: 800; letter-spacing: -.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .m-stats b.sp { color: var(--spend); }
+  @media (max-width: 420px) { .m-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (min-width: 600px) { .m-stats b { font-size: 19px; } .m-stats div { padding: 9px 12px; } }
+  .m-budget { height: 6px; margin: -2px 0 12px; }
+  /* earned: a green bar filling along the bottom of the day, longer = more */
+  .cd .eb { position: absolute; left: 4px; bottom: 3px; height: 4px; width: calc((100% - 8px) * var(--f)); border-radius: 2px; background: var(--ok); box-shadow: 0 0 0 1.5px rgba(255,255,255,.85); transform-origin: left; }
+  .cd .ea { display: none; font-style: normal; font-size: 11px; font-weight: 800; color: var(--ok); }
+  .cd.lv3 .ea, .cd.lv4 .ea { color: #fff; }
+  @media (min-width: 760px) { .cd { min-height: 72px; } .cd .ea { display: block; margin-bottom: 4px; } }
+  .back { display: inline-flex; align-items: center; gap: 2px; font-size: 13px; font-weight: 700; color: var(--accent); text-decoration: none; margin: -4px 0 4px -4px; padding: 2px 6px 2px 2px; border-radius: 8px; }
+  .back svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+  .back:hover { background: var(--accent-soft); }
+
+  /* motion: short and quiet. A new page fades up, swipes slide, numbers settle. */
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } }
+  @keyframes slideFromR { from { opacity: 0; transform: translateX(28px); } }
+  @keyframes slideFromL { from { opacity: 0; transform: translateX(-28px); } }
+  @keyframes cellIn { from { opacity: 0; transform: scale(.88); } }
+  @keyframes growX { from { transform: scaleX(0); } }
+  @keyframes growY { from { transform: scaleY(0); } }
+  @keyframes dlgIn { from { opacity: 0; transform: translateY(10px) scale(.98); } }
+  @keyframes fade { from { opacity: 0; } }
+  .enter > * { animation: fadeUp .38s cubic-bezier(.2, .8, .2, 1) backwards; }
+  .enter > :nth-child(2) { animation-delay: .04s; } .enter > :nth-child(3) { animation-delay: .08s; }
+  .enter > :nth-child(4) { animation-delay: .12s; } .enter > :nth-child(n+5) { animation-delay: .16s; }
+  .slide-r { animation: slideFromR .32s cubic-bezier(.2, .8, .2, 1); }
+  .slide-l { animation: slideFromL .32s cubic-bezier(.2, .8, .2, 1); }
+  :is(.enter, .month[class*="slide-"]) .cd { animation: cellIn .32s calc(var(--i) * 9ms + .05s) cubic-bezier(.2, .8, .2, 1) backwards; }
+  :is(.enter, .month[class*="slide-"], .slide-r, .slide-l) :is(.meter i, .eb) { animation: growX .8s .15s cubic-bezier(.2, .8, .2, 1) backwards; transform-origin: left; }
+  .enter .barcol .bt i { animation: growY .8s calc(var(--i, 0) * 12ms + .1s) cubic-bezier(.2, .8, .2, 1) backwards; transform-origin: bottom; }
+  .enter .split i { animation: growX .7s .15s cubic-bezier(.2, .8, .2, 1) backwards; transform-origin: left; }
+  dialog[open] { animation: dlgIn .22s cubic-bezier(.2, .8, .2, 1); }
+  dialog[open]::backdrop { animation: fade .22s ease; }
+  .item { animation: fadeUp .22s cubic-bezier(.2, .8, .2, 1); }
+  .row, .cd, .chip, .b { transition: transform .15s ease, box-shadow .15s ease, background .15s ease, filter .15s ease; }
+  .row:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,.05); }
+  .row:active, .cd:active, .b:active:not(:disabled), .chip:active { transform: scale(.97); }
+  @media (prefers-reduced-motion: reduce) {
+    .enter > *, .slide-r, .slide-l, .cd, .meter i, .eb, .barcol .bt i, .split i, dialog[open], dialog[open]::backdrop, .item { animation: none !important; }
+    .row, .cd, .chip, .b, .month { transition: none; }
+    .row:hover, .row:active, .cd:active, .b:active, .chip:active { transform: none; }
+  }
   .toast { position: fixed; left: 12px; right: 12px; bottom: calc(var(--nav-h) + 16px + env(safe-area-inset-bottom)); max-width: 440px; margin: 0 auto; background: var(--ink); color: #fff; padding: 13px 16px; border-radius: 14px; font-size: 14px; font-weight: 600; transform: translateY(calc(100% + 160px)); visibility: hidden; transition: transform .25s ease, visibility .25s; z-index: 30; }
   @media (min-width: 960px) { .toast { bottom: 24px; } }
   .toast.show { transform: none; visibility: visible; }

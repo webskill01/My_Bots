@@ -191,6 +191,9 @@ function wantedMonth() {
   if (name === 'day') return arg[0].slice(0, 7);
   return MONTHLY.includes(name) && isMonth(arg[0]) ? arg[0] : S ? S.month : '';
 }
+let shown = '';            // the route last drawn: a new one gets the entrance animation
+let fromHome = false;      // a day page opened from Entries: its back link is history.back()
+const calm = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 function render(force = true) {
   if (!S) return;
   const [name, arg] = route();
@@ -199,10 +202,32 @@ function render(force = true) {
   // never redraw under the user's fingers: a dialog, or typing
   const typing = document.activeElement && $('#view').contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
   if ($('#dlg').open || $('#edit').open || (!force && typing)) return;
-  const y = window.scrollY;
+  const y = window.scrollY, key = location.hash || '#entries';
+  const fresh = key !== shown;
+  shown = key;
+  const v = $('#view');
+  v.ontouchstart = v.ontouchend = null;
+  const dir = slideIn;
   VIEWS[name](...arg);
+  v.classList.remove('enter', 'slide-l', 'slide-r');
+  // a swiped month card slides by itself; everything else fades up
+  if (fresh && !(dir && name === 'entries')) { void v.offsetWidth; v.classList.add(name === 'day' && dir ? 'slide-' + dir : 'enter'); }
+  if (name === 'day') slideIn = '';
   window.scrollTo(0, y);
 }
+// links marked data-replace move without adding a Back step; day links opened
+// from Entries remember they came from home
+document.addEventListener('click', e => {
+  const a = e.target.closest('a[href^="#"]');
+  if (!a) return;
+  if (a.hasAttribute('data-replace')) {
+    e.preventDefault();
+    if (a.dataset.dir) slideIn = a.dataset.dir;
+    location.replace(a.getAttribute('href'));
+  } else if (a.id !== 'goHome') {
+    fromHome = a.getAttribute('href').startsWith('#day/') && route()[0] === 'entries';
+  }
+});
 window.addEventListener('hashchange', async () => {
   if (route()[0] === 'settings') A = null;   // people and invites, fresh each visit
   if (S && wantedMonth() !== S.month) await refresh(true); else render();
@@ -262,24 +287,74 @@ function wireQuickAdd() {
 }
 
 // ---- Entries (home): the month as a calendar, then every entry by day ----
-function calendarHtml(m) {
-  const days = daysIn(m), lead = wd(m + '-01');
-  const spent = [...Array(days)].map((_, i) => spentOn(`${m}-${String(i + 1).padStart(2, '0')}`));
-  const earnedDays = new Set(S.entries.filter(e => e.kind === 'earn').map(e => e.on_date));
+// The month card on Entries: name, totals, then the calendar. Swipe it (or use
+// the arrow keys / the desktop chevrons) to change month.
+function monthCard(m) {
+  const days = daysIn(m), lead = wd(m + '-01'), cur = m === thisMonth(), t = totals(S.entries);
+  const dayOf = i => `${m}-${String(i + 1).padStart(2, '0')}`;
+  const spent = [...Array(days)].map((_, i) => spentOn(dayOf(i)));
+  const earned = [...Array(days)].map((_, i) => S.entries.filter(e => e.kind === 'earn' && e.on_date === dayOf(i)).reduce((a, e) => a + e.amount, 0));
   // shade against a typical day, not the peak: one rent day mustn't wash out the rest
   const sorted = spent.filter(Boolean).sort((a, b) => a - b);
   const ref = sorted.length ? sorted[Math.floor(sorted.length * 0.8)] || sorted[sorted.length - 1] : 1;
   const level = v => (!v ? 0 : v >= ref * 1.5 ? 4 : v >= ref ? 3 : v >= ref * 0.45 ? 2 : 1);
+  const topEarn = Math.max(1, ...earned);
   const cells = spent.map((v, i) => {
-    const d = `${m}-${String(i + 1).padStart(2, '0')}`;
-    return `<a class="cd lv${level(v)} ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" href="#day/${d}" aria-label="${esc(fmtDate(d, { weekday: 'long', day: 'numeric', month: 'long' }))}: ${v ? money(v) + ' spent' : 'nothing spent'}">
-      <b>${i + 1}</b><span>${v ? short(v) : ''}</span>${earnedDays.has(d) ? '<i class="ed" title="Earned this day"></i>' : ''}</a>`;
+    const d = dayOf(i), e = earned[i];
+    const label = `${fmtDate(d, { weekday: 'long', day: 'numeric', month: 'long' })}: ${v ? money(v) + ' spent' : 'nothing spent'}${e ? ', ' + money(e) + ' earned' : ''}`;
+    return `<a class="cd lv${level(v)} ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" href="#day/${d}" style="--i:${i}" aria-label="${esc(label)}" title="${esc(label)}">
+      <b>${i + 1}</b><span>${v ? short(v) : ''}</span>${e ? `<em class="ea">+${short(e)}</em><i class="eb" style="--f:${Math.max(0.3, e / topEarn).toFixed(2)}"></i>` : ''}</a>`;
   });
-  return `<div class="card">
+  return `<section class="card month ${slideIn ? 'slide-' + slideIn : ''}" id="monthCard" tabindex="-1" aria-label="${esc(monthName(m))}">
+    <div class="m-top">
+      <button class="chev" data-month="-1" aria-label="Previous month" type="button">${svg('prev')}</button>
+      <div class="m-name"><h1>${esc(monthName(m))}</h1>${cur ? '<span class="pill">this month</span>' : `<a class="pill now" href="#entries/${thisMonth()}" data-replace>back to this month</a>`}</div>
+      <button class="chev" data-month="1" aria-label="Next month" type="button" ${cur ? 'disabled' : ''}>${svg('next')}</button>
+    </div>
+    <div class="m-stats">
+      <div><span>Spent</span><b class="sp">${money(t.spent)}</b></div>
+      <div><span>Earned</span><b class="pos">${money(t.earned, true)}</b></div>
+      <div><span>Net</span><b class="${t.net < 0 ? 'neg' : 'pos'}">${money(t.net, true)}</b></div>
+      <div><span>Entries</span><b>${S.entries.length}</b></div>
+    </div>
+    ${S.budget ? `<div class="meter m-budget" style="--tc:${t.spent > S.budget ? 'var(--bad)' : t.spent * 100 >= S.budget * 80 ? 'var(--deep)' : 'var(--ok)'}" title="Budget ${money(S.budget)}: ${pct(t.spent, S.budget)}% used"><i style="--v:${pct(t.spent, S.budget)}"></i></div>` : ''}
     <div class="cal">${DAYS.map(d => `<span class="cal-h">${d.slice(0, 2)}</span>`).join('')}
       ${'<span></span>'.repeat(lead)}${cells.join('')}</div>
-    <div class="cal-legend"><span><i style="background:color-mix(in srgb,var(--spend) 14%,#fff)"></i>light day</span><span><i style="background:var(--spend)"></i>heavy day</span><span><i style="background:var(--ok);border-radius:50%"></i>money came in</span><span>Tap a day to open it</span></div>
-  </div>`;
+    <div class="cal-legend"><span><i style="background:color-mix(in srgb,var(--spend) 22%,#fff)"></i>spent: darker = more</span><span><i style="background:var(--ok)"></i>earned</span><span class="swipe-hint">Swipe for other months</span></div>
+  </section>`;
+}
+let slideIn = '';   // 'l' or 'r': which way the next card or day slides in
+function goMonth(step) {
+  const m = addMonths(S.month, step);
+  if (m > thisMonth()) {   // no future months: a small shake instead
+    const c = $('#monthCard');
+    if (c && !calm()) c.animate([{ transform: 'translateX(0)' }, { transform: 'translateX(-10px)' }, { transform: 'translateX(5px)' }, { transform: 'none' }], 260);
+    return;
+  }
+  slideIn = step > 0 ? 'r' : 'l';
+  location.replace(`#entries/${m}`);   // months don't pile up in Back
+}
+function wireMonthCard() {
+  const c = $('#monthCard');
+  slideIn = '';
+  if (!c) return;
+  $$('[data-month]', c).forEach(b => b.onclick = () => goMonth(+b.dataset.month));
+  c.onkeydown = e => { if (e.key === 'ArrowLeft') goMonth(-1); if (e.key === 'ArrowRight') goMonth(1); };
+  // the card follows the finger a little, then a flick changes month
+  let x0 = null, y0 = 0, dx = 0, lock = null;
+  c.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; lock = null; c.style.transition = 'none'; }, { passive: true });
+  c.addEventListener('touchmove', e => {
+    if (x0 === null) return;
+    dx = e.touches[0].clientX - x0;
+    const dy = e.touches[0].clientY - y0;
+    if (lock === null && Math.abs(dx) + Math.abs(dy) > 8) lock = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    if (lock === 'x') c.style.transform = `translateX(${dx * 0.35}px)`;
+  }, { passive: true });
+  c.addEventListener('touchend', () => {
+    c.style.transition = ''; c.style.transform = '';
+    if (lock === 'x' && Math.abs(dx) > 60) goMonth(dx < 0 ? 1 : -1);
+    x0 = null;
+  });
 }
 
 function entriesView(_, cat) {
@@ -295,9 +370,8 @@ function entriesView(_, cat) {
   const groups = {};
   list.forEach(e => (groups[e.on_date] = groups[e.on_date] || []).push(e));
   $('#view').innerHTML = `
-    ${head('entries', catName || monthName(m), `${list.length} ${list.length === 1 ? 'entry' : 'entries'} · spent ${money(t.spent)}${t.earned ? ` · earned ${money(t.earned, true)}` : ''}${catName ? ' · ' + esc(monthName(m)) : ''}`)}
     ${quickAddHtml()}
-    ${catId === null ? calendarHtml(m) : ''}
+    ${catId === null ? monthCard(m) : head('entries', catName, `${esc(monthName(m))} · ${list.length} ${list.length === 1 ? 'entry' : 'entries'} · spent ${money(t.spent)}${t.earned ? ` · earned ${money(t.earned, true)}` : ''}`)}
     <div class="chips" role="group" aria-label="Filter" style="margin-top:14px">
       ${[['all', 'All'], ['exp', 'Spent'], ['earn', 'Earned']].map(([k, l]) => `<button class="chip" data-kind-f="${k}" aria-pressed="${kindFilter === k}">${l}</button>`).join('')}
       ${catId !== null ? `<a class="chip" aria-pressed="true" href="#entries/${m}">${esc(catName)} ✕</a>` : ''}
@@ -314,6 +388,7 @@ function entriesView(_, cat) {
     const el = $('#q'); el.focus(); el.setSelectionRange(el.value.length, el.value.length);
   };
   wireQuickAdd();
+  wireMonthCard();
   wireRows();
 }
 
@@ -330,11 +405,11 @@ function dayView(d) {
     : fmtDate(d, { day: 'numeric', month: 'long', year: 'numeric' });
   $('#view').innerHTML = `
     <div class="head">
-      <div><h1>${esc(dayLabel(d))}</h1><p class="sub">${esc(sub)} · <a href="#entries/${m}">${esc(monthName(m))}</a></p></div>
+      <div><a class="back" href="#entries/${m}" id="goHome">${svg('prev')} Entries</a><h1>${esc(dayLabel(d))}</h1><p class="sub">${esc(sub)}</p></div>
       <div class="nav">
-        <a class="b icon line" href="#day/${addDays(d, -1)}" aria-label="Previous day">${svg('prev')}</a>
-        <a class="b line ${isToday ? 'gap' : ''}" href="#day/${S.today}" ${isToday ? 'tabindex="-1" aria-hidden="true"' : ''}>Today</a>
-        <a class="b icon line" href="#day/${addDays(d, 1)}" aria-label="Next day" ${d >= S.today ? 'hidden' : ''}>${svg('next')}</a>
+        <a class="b icon line" href="#day/${addDays(d, -1)}" data-replace data-dir="l" aria-label="Previous day">${svg('prev')}</a>
+        <a class="b line ${isToday ? 'gap' : ''}" href="#day/${S.today}" data-replace ${isToday ? 'tabindex="-1" aria-hidden="true"' : ''}>Today</a>
+        <a class="b icon line" href="#day/${addDays(d, 1)}" data-replace data-dir="r" aria-label="Next day" ${d >= S.today ? 'hidden' : ''}>${svg('next')}</a>
       </div>
     </div>
     <div class="tiles">
@@ -351,6 +426,23 @@ function dayView(d) {
     <div class="sec-h"><h2>${list.length ? `${list.length} ${list.length === 1 ? 'entry' : 'entries'}` : ''}</h2></div>
     <div class="list">${list.map(e => row(e, true)).join('') || `<div class="empty">Nothing on this day${future ? '' : ' yet. Add what you spent with the button above'}.</div>`}</div>`;
   $('#addDay') && ($('#addDay').onclick = () => openAdd(d));
+  // Home is one Back step away when we came from it, however many days were stepped through
+  $('#goHome').onclick = e => {
+    e.preventDefault();
+    if (fromHome) history.back(); else location.replace(e.currentTarget.getAttribute('href'));
+  };
+  // swipe between days too
+  const v = $('#view');
+  let x0 = null;
+  v.ontouchstart = e => { x0 = e.target.closest('.row') ? null : e.touches[0].clientX; };
+  v.ontouchend = e => {
+    if (x0 === null) return;
+    const dx = e.changedTouches[0].clientX - x0;
+    x0 = null;
+    if (Math.abs(dx) < 70) return;
+    const to = addDays(d, dx < 0 ? 1 : -1);
+    if (to <= S.today) { slideIn = dx < 0 ? 'r' : 'l'; location.replace(`#day/${to}`); }
+  };
   wireRows();
 }
 
@@ -387,7 +479,7 @@ function overviewView() {
     ${budget}
     ${S.entries.length ? `
     <div class="card"><h2>Spending by day</h2>
-      <div class="bars">${perDay.map((v, i) => { const d = `${m}-${String(i + 1).padStart(2, '0')}`; return `<a class="barcol ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" href="#day/${d}" title="${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}: ${money(v)}">
+      <div class="bars">${perDay.map((v, i) => { const d = `${m}-${String(i + 1).padStart(2, '0')}`; return `<a class="barcol ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" style="--i:${i}" href="#day/${d}" title="${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}: ${money(v)}">
         <span class="bt"><i style="--v:${pct(v, peak)}"></i></span><span class="bl ${(i + 1) % 5 && i ? 'hide' : ''}">${i + 1}</span></a>`; }).join('')}</div>
     </div>
     <div class="grid2">
