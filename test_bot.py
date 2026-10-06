@@ -182,6 +182,8 @@ def test_parse_date(token, expected):
     ("30d",   None, dt.date(2026, 7, 28), TODAY),
     ("nd",    3,    dt.date(2026, 8, 24), TODAY),
     ("nd",    1,    TODAY,                TODAY),
+    ("mon",   None, dt.date(2026, 7, 1),  dt.date(2026, 7, 31)),   # last month, whole
+    ("mon",   8,    dt.date(2025, 12, 1), dt.date(2025, 12, 31)),  # across a year
 ])
 def test_period_range(key, n, start, end):
     assert parse.period_range(key, TODAY, n) == (start, end)

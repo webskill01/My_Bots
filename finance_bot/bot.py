@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 PAGE = 10
 MAX_LINES = 50          # a Telegram message has a size limit; lists stay browsable
 PERIODS = [("week", "This week"), ("month", "This month"),
-           ("7d", "Last 7 days"), ("30d", "Last 30 days"),
+           ("mon", "Last month"), ("7d", "Last 7 days"), ("30d", "Last 30 days"),
            ("nd", "Last N days"), ("all", "All time")]
 PERIOD_LABEL = dict(PERIODS)
 
@@ -79,9 +79,31 @@ def _range(context, today):
     return parse.period_range(key, today, n)
 
 
-def _period_name(context) -> str:
+def _period_name(context, today: dt.date) -> str:
     key, n = _period(context)
+    if key == "mon":
+        return parse.period_range(key, today, n)[0].strftime("%B %Y")
     return f"Last {n} days" if key == "nd" else PERIOD_LABEL[key]
+
+
+def _months_ago(context) -> int | None:
+    """0 for this month, 1+ for a past month, None for any other period."""
+    key, n = _period(context)
+    return 0 if key == "month" else (n or 1) if key == "mon" else None
+
+
+def _month_nav(context, today: dt.date, view: str) -> list:
+    """◀ / ▶ to step through calendar months. Empty unless a month is showing.
+    `view` is the callback the period was set from, e.g. "sum" or "ent:0"."""
+    ago = _months_ago(context)
+    if ago is None:
+        return []
+    label = lambda k: parse.period_range("mon", today, k)[0].strftime("%b %Y")
+    row = [Btn(f"◀ {label(ago + 1)}", callback_data=f"mon:{ago + 1}:{view}")]
+    if ago > 0:
+        nxt = "This month" if ago == 1 else label(ago - 1)
+        row.append(Btn(f"{nxt} ▶", callback_data=f"mon:{ago - 1}:{view}"))
+    return [row]
 
 
 def _money(amount: int, user) -> str:
@@ -103,10 +125,11 @@ def menu_kb() -> Kb:
     ])
 
 
-def period_kb(view: str, back: str | None = None) -> Kb:
+def period_kb(view: str, back: str | None = None, top: list | None = None) -> Kb:
     """One picker, reused by Summary, Entries and Categories. `view` is what a
-    period tap redraws; `back` is where ← goes, when that isn't the view itself."""
-    rows, pair = [], []
+    period tap redraws; `back` is where ← goes, when that isn't the view itself.
+    `top` rows go above the periods (the month arrows)."""
+    rows, pair = list(top or []), []
     for key, label in PERIODS:
         pair.append(Btn(label, callback_data=f"per:{key}:{view}"))
         if len(pair) == 2:
@@ -143,12 +166,12 @@ def summary_view(conn, user, context) -> tuple[str, Kb]:
     s = db.summary(conn, user["user_id"], start, end)
 
     span = f" · {_fmt_date(start)} – {_fmt_date(end)}" if start > dt.date.min else ""
-    lines = [f"📊 <b>{_period_name(context)}</b>{span}", "",
+    lines = [f"📊 <b>{_period_name(context, today)}</b>{span}", "",
              f"Earned   {_money(s['earned'], user)}",
              f"Spent    {_money(s['spent'], user)}",
              f"Net      {'+' if s['net'] >= 0 else ''}{_money(s['net'], user)}"]
 
-    if user["budget"] and _period(context)[0] == "month":
+    if user["budget"] and _months_ago(context) is not None:
         left = user["budget"] - s["spent"]
         lines.append(f"Budget   {_money(user['budget'], user)} · "
                      f"{_money(abs(left), user)} {'left' if left >= 0 else 'over'}")
@@ -172,7 +195,8 @@ def summary_view(conn, user, context) -> tuple[str, Kb]:
     else:
         lines.append(f"{s['count']} entries")  # "all time" has no meaningful daily avg
 
-    return "\n".join(lines), period_kb("sum", back="menu")
+    return "\n".join(lines), period_kb("sum", back="menu",
+                                       top=_month_nav(context, today, "sum"))
 
 
 def day_view(conn, user, day: dt.date) -> tuple[str, Kb]:
@@ -202,13 +226,15 @@ def day_view(conn, user, day: dt.date) -> tuple[str, Kb]:
 
 def entries_view(conn, user, context, page: int) -> tuple[str, Kb]:
     uid = user["user_id"]
-    start, end = _range(context, db.user_today(user))
+    today = db.user_today(user)
+    start, end = _range(context, today)
     total = db.count_entries(conn, uid, start, end)
     rows = db.list_entries(conn, uid, start, end, limit=PAGE, offset=page * PAGE)
+    months = _month_nav(context, today, "ent:0")
 
-    head = f"📝 <b>Entries</b> · {_period_name(context)} · {total} total"
+    head = f"📝 <b>Entries</b> · {_period_name(context, today)} · {total} total"
     if not rows:
-        return head + "\n\nNothing here yet.", period_kb("ent:0", back="menu")
+        return head + "\n\nNothing here yet.", period_kb("ent:0", back="menu", top=months)
 
     lines = [head, f"Page {page + 1} of {(total + PAGE - 1) // PAGE}", ""]
     buttons = []
@@ -227,6 +253,7 @@ def entries_view(conn, user, context, page: int) -> tuple[str, Kb]:
         nav.append(Btn("Older ▶", callback_data=f"ent:{page + 1}"))
     if nav:
         buttons.append(nav)
+    buttons += months
     buttons.append([Btn("🗓 Period", callback_data="ent:period"),
                     Btn("← Back", callback_data="menu")])
     return "\n".join(lines), Kb(buttons)
@@ -248,7 +275,8 @@ def entry_view(conn, user, entry_id: int, back: str = "ent:0") -> tuple[str, Kb]
 
 def cats_view(conn, user, context) -> tuple[str, Kb]:
     uid = user["user_id"]
-    start, end = _range(context, db.user_today(user))
+    today = db.user_today(user)
+    start, end = _range(context, today)
     spent = {t["category_id"]: t for t in db.category_totals(conn, uid, start, end)}
     earned = {t["category_id"]: t for t in
               db.category_totals(conn, uid, start, end, kind="earn")}
@@ -265,7 +293,7 @@ def cats_view(conn, user, context) -> tuple[str, Kb]:
     def _count(cat_id) -> int:
         return sum(t[cat_id]["count"] for t in (spent, earned) if cat_id in t)
 
-    lines = [f"📂 <b>Categories</b> · {_period_name(context)}", ""]
+    lines = [f"📂 <b>Categories</b> · {_period_name(context, today)}", ""]
     buttons = []
     for cat in db.list_categories(conn, uid):
         amounts = _amounts(cat["id"])
@@ -281,13 +309,15 @@ def cats_view(conn, user, context) -> tuple[str, Kb]:
 
     buttons.append([Btn("＋ New category", callback_data="cat:new"),
                     Btn("🗓 Period", callback_data="cat:period")])
+    buttons += _month_nav(context, today, "cat")
     buttons.append([Btn("← Back", callback_data="menu")])
     return "\n".join(lines), Kb(buttons)
 
 
 def cat_view(conn, user, context, cat_id: int, page: int) -> tuple[str, Kb]:
     uid = user["user_id"]
-    start, end = _range(context, db.user_today(user))
+    today = db.user_today(user)
+    start, end = _range(context, today)
     key = cat_id or None  # 0 is our stand-in for uncategorized
     cat = next((c for c in db.list_categories(conn, uid) if c["id"] == key), None)
     if key and cat is None:
@@ -304,7 +334,7 @@ def cat_view(conn, user, context, cat_id: int, page: int) -> tuple[str, Kb]:
     totals = " · ".join(
         ([f"Earned +{_money(earned, user)}"] if earned else []) +
         ([f"Spent {_money(spent, user)}"] if spent or not earned else []))
-    lines = [f"📂 <b>{_e(name)}</b> · {_period_name(context)}", totals, ""]
+    lines = [f"📂 <b>{_e(name)}</b> · {_period_name(context, today)}", totals, ""]
     buttons = []
     for row in rows:
         lines.append(f"  {_fmt_date(_date(row['on_date']))}  {_e(row['name']) or '—'}"
@@ -322,6 +352,7 @@ def cat_view(conn, user, context, cat_id: int, page: int) -> tuple[str, Kb]:
         nav.append(Btn("Older ▶", callback_data=f"cat:{cat_id}:{page + 1}"))
     if nav:
         buttons.append(nav)
+    buttons += _month_nav(context, today, f"cat:{cat_id}:0")
     if key:
         buttons.append([Btn("✏️ Rename", callback_data=f"cat:{cat_id}:ren"),
                         Btn("🗑 Delete", callback_data=f"cat:{cat_id}:del")])
@@ -647,6 +678,8 @@ async def _reshow(update, context, conn, user, entry_id: int) -> None:
 def _view_by_name(conn, user, context, name: str):
     if name.startswith("ent"):
         return entries_view(conn, user, context, 0)
+    if name.startswith("cat:"):   # one category, e.g. "cat:5:0"
+        return cat_view(conn, user, context, int(name.split(":")[1]), 0)
     if name.startswith("cat"):
         return cats_view(conn, user, context)
     return summary_view(conn, user, context)
@@ -675,6 +708,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await q.message.reply_text("How many days back?")
             return
         context.user_data["period"] = (key, None)
+        await _show(q, _view_by_name(conn, user, context, back))
+
+    elif head == "mon":
+        ago, _, back = rest.partition(":")
+        ago = min(int(ago), 1200)   # ponytail: 100 years back is plenty
+        context.user_data["period"] = ("mon", ago) if ago else ("month", None)
         await _show(q, _view_by_name(conn, user, context, back))
 
     elif head == "day":

@@ -122,7 +122,11 @@ def parse_entry(text: str, today: dt.date) -> Parsed | None:
 
 
 def period_range(key: str, today: dt.date, n: int | None = None) -> tuple[dt.date, dt.date]:
-    """Inclusive (start, end) for a named period. End is always today."""
+    """Inclusive (start, end) for a named period. End is today, except "mon":
+    the whole calendar month `n` months back (1 = last month)."""
+    if key == "mon":
+        y, m = divmod(today.year * 12 + today.month - 1 - (n or 1), 12)
+        return dt.date(y, m + 1, 1), dt.date(y, m + 1, calendar.monthrange(y, m + 1)[1])
     if key == "week":
         return today - dt.timedelta(days=today.weekday()), today
     if key == "month":
