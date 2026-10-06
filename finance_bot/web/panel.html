@@ -197,6 +197,63 @@
   .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   @media (max-width: 399px) { dialog .two { grid-template-columns: minmax(0, 1fr); gap: 0; } }
 
+
+  /* calendar: one month, each day shaded by what was spent */
+  .cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+  .cal-h { font-size: 11px; font-weight: 800; color: var(--muted); text-align: center; padding-bottom: 2px; }
+  .cd { position: relative; display: flex; flex-direction: column; justify-content: space-between; min-height: 52px; padding: 5px 6px; border-radius: 10px; background: var(--soft); text-decoration: none; min-width: 0; }
+  .cd b { font-size: 12.5px; line-height: 1; }
+  .cd span { font-size: 10.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .cd.lv1 { background: color-mix(in srgb, var(--spend) 14%, #fff); }
+  .cd.lv2 { background: color-mix(in srgb, var(--spend) 30%, #fff); }
+  .cd.lv3 { background: color-mix(in srgb, var(--spend) 50%, #fff); color: #fff; }
+  .cd.lv4 { background: var(--spend); color: #fff; }
+  .cd.today { box-shadow: 0 0 0 2px var(--accent); }
+  .cd.future { opacity: .35; pointer-events: none; background: transparent; border: 1px dashed var(--line); }
+  .cd .ed { position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 1.5px #fff; }
+  .cd:hover { filter: brightness(.96); }
+  @media (max-width: 599px) { .cd { padding: 4px; } .cd span { font-size: 9.5px; letter-spacing: -.02em; } .cd .ed { top: 4px; right: 4px; width: 6px; height: 6px; } }
+  @media (min-width: 600px) { .cd { min-height: 62px; padding: 7px 8px; } .cd span { font-size: 11.5px; } }
+  .cal-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .cal-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+
+  /* a day */
+  .row.timed { grid-template-columns: 54px minmax(0, 1fr) auto; }
+  .row .tm { font-size: 12.5px; font-weight: 800; color: var(--muted); line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .row .tm small { display: block; font-size: 10.5px; font-weight: 700; }
+  .split { display: flex; gap: 2px; height: 12px; border-radius: 6px; overflow: hidden; margin-top: 4px; }
+  .split i { flex: var(--v) 1 0; background: var(--tc); min-width: 4px; }
+  .day-h a { text-decoration: none; }
+  .day-h a:hover b { color: var(--accent); }
+  .add-day { width: 100%; margin: 10px 0 4px; }
+  .sec-h { margin: 16px 2px 8px; } .sec-h h2 { margin: 0; font-size: 14px; color: var(--muted); }
+
+  /* the multi-item form */
+  dialog.wide { width: min(680px, calc(100vw - 24px)); }
+  #edit { margin-top: max(12px, 5vh); }   /* grows downward: rows added never shift what you're about to tap */
+  .f-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .f-head h2 { margin: 0; }
+  .f-date { margin: 0; font-size: 11.5px; color: var(--muted); flex: none; }
+  .f-date input { min-height: 38px; padding: 6px 10px; width: 160px; }
+  @media (max-width: 499px) { .f-head { flex-wrap: wrap; } .f-date, .f-date input { width: 100%; } }
+  .f-lbl { font-size: 11.5px; font-weight: 700; color: var(--muted); margin: 8px 0 5px; }
+  .chips.wrap { flex-wrap: wrap; overflow: visible; margin-bottom: 4px; }
+  @media (max-width: 599px) { #recent { flex-wrap: nowrap; overflow-x: auto; } }   /* one swipeable row on phones */
+  .chip.sm { padding: 4px 10px; font-size: 12.5px; }
+  .chip .pos { font-weight: 800; }
+  .item { display: grid; grid-template-columns: 40px minmax(0, 1fr) minmax(0, 1fr) 36px; grid-template-areas: "k amt amt rm" "name name cat cat" "new new new new"; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 12px; margin-top: 8px; background: var(--bg); }
+  .item input, .item select { min-height: 40px; padding: 7px 10px; }
+  .item .kb { grid-area: k; } .item .ia { grid-area: amt; font-weight: 700; } .item .in { grid-area: name; } .item .ic { grid-area: cat; } .item .inew { grid-area: new; } .item .rm { grid-area: rm; }
+  @media (min-width: 600px) {
+    .item { grid-template-columns: 40px 120px minmax(0, 1.3fr) minmax(0, 1fr) 36px; grid-template-areas: "k amt name cat rm" ". new new new ."; }
+  }
+  .kb { border: 0; border-radius: 10px; font: inherit; font-size: 20px; font-weight: 800; cursor: pointer; line-height: 1; }
+  .kb.exp { background: var(--spend-soft); color: var(--spend); }
+  .kb.earn { background: var(--ok-soft); color: var(--ok); }
+  .rm { border: 0; background: none; color: var(--muted); font-size: 18px; cursor: pointer; border-radius: 8px; }
+  .rm:hover { background: var(--soft); color: var(--bad); }
+  .f-total { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: var(--soft); font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .f-total:empty { display: none; }
   .toast { position: fixed; left: 12px; right: 12px; bottom: calc(var(--nav-h) + 16px + env(safe-area-inset-bottom)); max-width: 440px; margin: 0 auto; background: var(--ink); color: #fff; padding: 13px 16px; border-radius: 14px; font-size: 14px; font-weight: 600; transform: translateY(calc(100% + 160px)); visibility: hidden; transition: transform .25s ease, visibility .25s; z-index: 30; }
   @media (min-width: 960px) { .toast { bottom: 24px; } }
   .toast.show { transform: none; visibility: visible; }
@@ -255,22 +312,18 @@
 </div>
 
 <dialog id="edit" aria-labelledby="editTitle">
-  <form id="editForm" method="dialog">
-    <h2 id="editTitle">New entry</h2>
-    <div class="seg" role="group" aria-label="Kind">
-      <button type="button" data-kind="exp">Spent</button>
-      <button type="button" data-kind="earn">Earned</button>
+  <form id="editForm" method="dialog" autocomplete="off">
+    <div class="f-head">
+      <div><h2 id="editTitle">Add items</h2><p class="small" id="editSub"></p></div>
+      <label class="f-date"><span>Day</span><input id="fDate" type="date" required></label>
     </div>
-    <div class="two">
-      <div><label for="fAmount">Amount</label><input id="fAmount" inputmode="decimal" autocomplete="off" required placeholder="250"></div>
-      <div><label for="fDate">Date</label><input id="fDate" type="date" required></div>
-    </div>
-    <label for="fName">What for</label>
-    <input id="fName" maxlength="100" autocomplete="off" placeholder="lunch, rent, salary…">
-    <label for="fCat">Category</label>
-    <input id="fCat" list="catList" maxlength="32" autocomplete="off" placeholder="none">
+    <div id="recentBox"><p class="f-lbl">Recent · tap to add</p><div class="chips wrap" id="recent"></div></div>
+    <div id="items"></div>
+    <button class="b line sm" type="button" id="addRow" style="margin-top:8px">＋ Another item</button>
+    <p class="hint" id="rowHint">Enter jumps to the next item. Tap − / + to switch spent and earned.</p>
+    <div class="f-total" id="fTotal" aria-live="polite"></div>
     <p class="err" id="editErr" hidden></p>
-    <div class="acts fill" style="margin-top:18px">
+    <div class="acts fill" style="margin-top:14px">
       <button class="b warn" type="button" id="fDelete">Delete</button>
       <button class="b" type="button" id="fCancel">Cancel</button>
       <button class="b primary" type="submit" id="fSave">Save</button>
@@ -287,7 +340,6 @@
   </div>
 </dialog>
 
-<datalist id="catList"></datalist>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/panel.js"></script>
 </body>

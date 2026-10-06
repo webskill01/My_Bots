@@ -1,5 +1,6 @@
-// Finance panel. Hash routes, all per month:
-// #overview/<YYYY-MM>  #entries/<YYYY-MM>[/<cat id | 0 for none>]  #categories/<YYYY-MM>  #months  #settings
+// Finance panel. Hash routes (Entries is home):
+// #entries/<YYYY-MM>[/<cat id | 0 for none>]  #day/<YYYY-MM-DD>  #overview/<YYYY-MM>
+// #categories/<YYYY-MM>  #months  #settings
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -7,15 +8,31 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 // Dates are 'YYYY-MM-DD' strings in the user's timezone (the server says
 // what today is). UTC math on them keeps the browser's timezone out of it.
 const D = s => new Date(s + 'T00:00:00Z');
+const iso = d => d.toISOString().slice(0, 10);
+const addDays = (s, n) => iso(new Date(D(s).getTime() + n * 864e5));
+const wd = s => (D(s).getUTCDay() + 6) % 7;                  // Mon = 0
 const fmtDate = (s, o) => D(s).toLocaleDateString('en-IN', { timeZone: 'UTC', ...o });
 const monthName = (m, short) => fmtDate(m + '-01', { month: short ? 'short' : 'long', year: 'numeric' });
 const addMonths = (m, n) => { const [y, mo] = m.split('-').map(Number); const t = y * 12 + mo - 1 + n; return `${Math.floor(t / 12)}-${String(t % 12 + 1).padStart(2, '0')}`; };
 const daysIn = m => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo, 0)).getUTCDate(); };
 const isMonth = s => /^\d{4}-(0[1-9]|1[0-2])$/.test(s || '');
+const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '') && !isNaN(D(s));
+const fmtTime = hm => { if (!hm) return ''; const [h, m] = hm.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function dayLabel(d) {
+  return d === S.today ? 'Today' : d === addDays(S.today, -1) ? 'Yesterday' : fmtDate(d, { weekday: 'long' });
+}
 
 // Amounts arrive in paise. Indian grouping (1,23,456); paise only when there are any.
 const money = (p, sign) => `${sign && p > 0 ? '+' : ''}${p < 0 ? '−' : ''}${S.currency}${(Math.abs(p) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+// For tight spots like calendar cells: ₹840, ₹1.2k, ₹1.5L
+function short(p) {
+  const r = p / 100;
+  const n = r >= 1e5 ? (r / 1e5).toFixed(r >= 1e6 ? 0 : 1) + 'L' : r >= 1e3 ? (r / 1e3).toFixed(r >= 1e4 ? 0 : 1) + 'k' : Math.round(r);
+  return S.currency + String(n).replace('.0', '');
+}
 const pct = (a, b) => (b ? Math.min(100, Math.round(a * 100 / b)) : 0);
+const paise = s => Math.round(parseFloat(String(s).replace(/[,\s₹$]/g, '')) * 100) || 0;
 
 const PALETTE = ['#2563eb', '#1f7a4a', '#a8660b', '#d6336c', '#7048e8', '#0b6e76', '#c2410c', '#0e7490'];
 const tc = name => { if (!name) return '#9a9a92'; let h = 0; for (const c of name.toLowerCase()) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; };
@@ -30,8 +47,8 @@ const ICON = {
   next: '<path d="M9 18l6-6-6-6"/>',
 };
 const svg = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[k]}</svg>`;
-const TABS = [['overview', 'Overview'], ['entries', 'Entries'], ['categories', 'Categories'], ['months', 'Months'], ['settings', 'Settings']];
-const MONTHLY = ['overview', 'entries', 'categories'];
+const TABS = [['entries', 'Entries'], ['overview', 'Overview'], ['categories', 'Categories'], ['months', 'Months'], ['settings', 'Settings']];
+const MONTHLY = ['entries', 'overview', 'categories'];
 
 let S = null;              // /api/state for one month
 let kindFilter = 'all';
@@ -72,20 +89,25 @@ function totals(list) {
   return { spent, earned, net: earned - spent };
 }
 // [{id, name, total, count}] for one kind, biggest first, uncategorized last
-function byCategory(kind) {
+function byCategory(kind, list = S.entries) {
   const g = {};
-  S.entries.filter(e => e.kind === kind).forEach(e => {
+  list.filter(e => e.kind === kind).forEach(e => {
     const k = e.category_id || 0;
     g[k] = g[k] || { id: k, name: e.category, total: 0, count: 0 };
     g[k].total += e.amount; g[k].count++;
   });
   return Object.values(g).sort((a, b) => !a.id - !b.id || b.total - a.total);
 }
+const spentOn = d => S.entries.filter(e => e.kind === 'exp' && e.on_date === d).reduce((a, e) => a + e.amount, 0);
 const catTag = e => (e.category ? `<span class="tag" style="--tc:${tc(e.category)}">${esc(e.category)}</span>` : '');
+const byTime = (a, b) => a.time.localeCompare(b.time) || a.id - b.id;
 
-function row(e) {
-  return `<div class="row ${e.kind}" data-open="${e.id}" tabindex="0" style="--tc:${e.category ? tc(e.category) : 'var(--line)'}">
-    <div style="min-width:0"><div class="t1">${esc(e.name) || '<span class="muted">—</span>'}</div>${e.category ? `<div class="t2">${catTag(e)}</div>` : ''}</div>
+// an entry row; `timed` puts the time it was added in its own column
+function row(e, timed) {
+  const meta = [catTag(e), timed ? '' : `<span>${fmtTime(e.time)}</span>`].filter(Boolean).join('');
+  return `<div class="row ${e.kind} ${timed ? 'timed' : ''}" data-open="${e.id}" tabindex="0" style="--tc:${e.category ? tc(e.category) : 'var(--line)'}">
+    ${timed ? `<div class="tm">${fmtTime(e.time).replace(' ', '<small>')}</small></div>` : ''}
+    <div style="min-width:0"><div class="t1">${esc(e.name) || '<span class="muted">—</span>'}</div>${meta ? `<div class="t2">${meta}</div>` : ''}</div>
     <div class="amt">${money(e.amount, e.kind === 'earn')}</div></div>`;
 }
 function wireRows() {
@@ -111,6 +133,7 @@ function head(view, title, sub) {
 // ---- shell ----
 $('.top .tabs').innerHTML = TABS.map(([k, l]) => `<a href="#${k}" data-tab="${k}">${l}</a>`).join('');
 $('.bottom').innerHTML = TABS.map(([k, l]) => `<a href="#${k}" data-tab="${k}">${svg(k)}${l}</a>`).join('');
+$('.brand').setAttribute('href', '#entries');
 function showLogin() {
   $('#app').hidden = true; $('#joinSec').hidden = true; $('#login').hidden = false;
   try { $('#un').value = $('#un').value || localStorage.getItem('finName') || ''; } catch (e) {}
@@ -146,7 +169,7 @@ $('#joinForm').onsubmit = async e => {
   try {
     await api('/api/join', { token: joinToken, name: $('#jName').value, password: $('#jPw').value });
     try { localStorage.setItem('finName', $('#jName').value.trim()); } catch (err) {}
-    history.replaceState(null, '', '/#overview');
+    history.replaceState(null, '', '/#entries');
     $('#joinSec').hidden = true;
     refresh(true);
     toast('Welcome! Add your first entry with the box at the top.');
@@ -154,16 +177,18 @@ $('#joinForm').onsubmit = async e => {
   finally { btn.disabled = false; }
 };
 
-const VIEWS = { overview: overviewView, entries: entriesView, categories: categoriesView, months: monthsView, settings: settingsView };
+const VIEWS = { entries: entriesView, day: dayView, overview: overviewView, categories: categoriesView, months: monthsView, settings: settingsView };
 function route() {
   let [name, ...arg] = location.hash.slice(1).split('/');
-  if (!VIEWS[name]) name = 'overview';
-  $$('[data-tab]').forEach(a => (a.dataset.tab === name ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
+  if (!VIEWS[name] || (name === 'day' && !isDate(arg[0]))) [name, arg] = ['entries', []];
+  const tab = name === 'day' ? 'entries' : name;
+  $$('[data-tab]').forEach(a => (a.dataset.tab === tab ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
   return [name, arg];
 }
-// The month a monthly view wants: from the hash, else the one already loaded.
+// The month a view wants: from the hash, else the one already loaded.
 function wantedMonth() {
   const [name, arg] = route();
+  if (name === 'day') return arg[0].slice(0, 7);
   return MONTHLY.includes(name) && isMonth(arg[0]) ? arg[0] : S ? S.month : '';
 }
 function render(force = true) {
@@ -201,6 +226,13 @@ async function refresh(force) {
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
+// Go wherever a just-saved day lives: that day's page, or its month.
+async function showSaved(day) {
+  const [name] = route();
+  const target = name === 'day' ? `#day/${day}` : day.slice(0, 7) !== S.month && MONTHLY.includes(name) ? `#${name}/${day.slice(0, 7)}` : '';
+  if (target && target !== location.hash) location.hash = target; else await refresh(true);
+}
+
 // ---- quick add: "250 lunch #food 24 aug", the same words the bot took ----
 let draft = '';
 function quickAddHtml() {
@@ -208,14 +240,14 @@ function quickAddHtml() {
     <div class="add-top">
       <input id="qText" placeholder="250 lunch #food" value="${esc(draft)}" aria-label="New entry" enterkeyhint="done">
       <button class="b primary" type="submit">Add</button>
-      <button class="b line" type="button" id="qForm">Form</button>
+      <button class="b line" type="button" id="qForm">Several</button>
     </div>
     <p class="hint"><code>+3000 salary</code> for income · <code>#food</code> sets a category · end with <code>24 aug</code> or <code>yesterday</code> for another day</p>
   </form>`;
 }
 function wireQuickAdd() {
   $('#qText').oninput = e => (draft = e.target.value);
-  $('#qForm').onclick = () => openEdit(null);
+  $('#qForm').onclick = () => openAdd(defaultDay());
   $('#quick').onsubmit = e => {
     e.preventDefault();
     if (!draft.trim()) return $('#qText').focus();
@@ -223,19 +255,110 @@ function wireQuickAdd() {
       const { entry } = await api('/api/quick', { text: draft });
       draft = '';
       toast(`${entry.kind === 'earn' ? 'Earned' : 'Spent'} ${money(entry.amount)}${entry.name ? ' · ' + entry.name : ''} · ${fmtDate(entry.on_date, { day: 'numeric', month: 'short' })}`);
-      // an entry for another month: go and show it there
-      if (entry.on_date.slice(0, 7) !== S.month) location.hash = `#${route()[0]}/${entry.on_date.slice(0, 7)}`;
-      else await refresh(true);
+      await showSaved(entry.on_date);
       $('#qText') && $('#qText').focus();
     });
   };
+}
+
+// ---- Entries (home): the month as a calendar, then every entry by day ----
+function calendarHtml(m) {
+  const days = daysIn(m), lead = wd(m + '-01');
+  const spent = [...Array(days)].map((_, i) => spentOn(`${m}-${String(i + 1).padStart(2, '0')}`));
+  const earnedDays = new Set(S.entries.filter(e => e.kind === 'earn').map(e => e.on_date));
+  // shade against a typical day, not the peak: one rent day mustn't wash out the rest
+  const sorted = spent.filter(Boolean).sort((a, b) => a - b);
+  const ref = sorted.length ? sorted[Math.floor(sorted.length * 0.8)] || sorted[sorted.length - 1] : 1;
+  const level = v => (!v ? 0 : v >= ref * 1.5 ? 4 : v >= ref ? 3 : v >= ref * 0.45 ? 2 : 1);
+  const cells = spent.map((v, i) => {
+    const d = `${m}-${String(i + 1).padStart(2, '0')}`;
+    return `<a class="cd lv${level(v)} ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" href="#day/${d}" aria-label="${esc(fmtDate(d, { weekday: 'long', day: 'numeric', month: 'long' }))}: ${v ? money(v) + ' spent' : 'nothing spent'}">
+      <b>${i + 1}</b><span>${v ? short(v) : ''}</span>${earnedDays.has(d) ? '<i class="ed" title="Earned this day"></i>' : ''}</a>`;
+  });
+  return `<div class="card">
+    <div class="cal">${DAYS.map(d => `<span class="cal-h">${d.slice(0, 2)}</span>`).join('')}
+      ${'<span></span>'.repeat(lead)}${cells.join('')}</div>
+    <div class="cal-legend"><span><i style="background:color-mix(in srgb,var(--spend) 14%,#fff)"></i>light day</span><span><i style="background:var(--spend)"></i>heavy day</span><span><i style="background:var(--ok);border-radius:50%"></i>money came in</span><span>Tap a day to open it</span></div>
+  </div>`;
+}
+
+function entriesView(_, cat) {
+  const m = S.month;
+  const catId = cat === undefined || cat === '' ? null : +cat;
+  const catName = catId === null ? '' : catId ? (S.categories.find(c => c.id === catId) || {}).name || 'Category' : 'Uncategorized';
+  const q = query.trim().toLowerCase();
+  const filtered = kindFilter !== 'all' || catId !== null || q;
+  const list = S.entries.filter(e => (kindFilter === 'all' || e.kind === kindFilter)
+    && (catId === null || (e.category_id || 0) === catId)
+    && (!q || (e.name || '').toLowerCase().includes(q) || (e.category || '').toLowerCase().includes(q)));
+  const t = totals(list);
+  const groups = {};
+  list.forEach(e => (groups[e.on_date] = groups[e.on_date] || []).push(e));
+  $('#view').innerHTML = `
+    ${head('entries', catName || monthName(m), `${list.length} ${list.length === 1 ? 'entry' : 'entries'} · spent ${money(t.spent)}${t.earned ? ` · earned ${money(t.earned, true)}` : ''}${catName ? ' · ' + esc(monthName(m)) : ''}`)}
+    ${quickAddHtml()}
+    ${catId === null ? calendarHtml(m) : ''}
+    <div class="chips" role="group" aria-label="Filter" style="margin-top:14px">
+      ${[['all', 'All'], ['exp', 'Spent'], ['earn', 'Earned']].map(([k, l]) => `<button class="chip" data-kind-f="${k}" aria-pressed="${kindFilter === k}">${l}</button>`).join('')}
+      ${catId !== null ? `<a class="chip" aria-pressed="true" href="#entries/${m}">${esc(catName)} ✕</a>` : ''}
+    </div>
+    <input class="search" id="q" type="search" placeholder="Search this month" value="${esc(query)}" aria-label="Search">
+    ${Object.keys(groups).sort().reverse().map(d => { const dt = totals(groups[d]); return `
+      <div class="day-h"><a href="#day/${d}"><b>${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}${d === S.today ? ' · today' : ''} ›</b></a>
+        <span>${dt.spent ? money(dt.spent) : ''}${dt.spent && dt.earned ? ' · ' : ''}${dt.earned ? `<span class="pos">${money(dt.earned, true)}</span>` : ''}</span></div>
+      <div class="list">${groups[d].sort((a, b) => byTime(b, a)).map(e => row(e)).join('')}</div>`; }).join('')
+      || `<div class="empty">${filtered ? 'Nothing matches.' : `Nothing recorded in ${esc(monthName(m))}. Type above, or tap a day in the calendar.`}</div>`}`;
+  $$('[data-kind-f]').forEach(b => b.onclick = () => { kindFilter = b.dataset.kindF; render(); });
+  $('#q').oninput = e => {
+    query = e.target.value; render();
+    const el = $('#q'); el.focus(); el.setSelectionRange(el.value.length, el.value.length);
+  };
+  wireQuickAdd();
+  wireRows();
+}
+
+// ---- Day: one date, in the order things were added ----
+function dayView(d) {
+  const list = S.entries.filter(e => e.on_date === d).sort(byTime);
+  const t = totals(list), m = d.slice(0, 7);
+  const isToday = d === S.today, future = d > S.today;
+  // month to date, and what an even split of the budget allows per day
+  const mtd = S.entries.filter(e => e.kind === 'exp' && e.on_date <= d).reduce((a, e) => a + e.amount, 0);
+  const daily = S.budget ? Math.round(S.budget / daysIn(m) / 100) * 100 : 0;   // whole rupees
+  const spentBy = byCategory('exp', list);
+  const sub = isToday ? fmtDate(d, { weekday: 'long', day: 'numeric', month: 'long' })
+    : fmtDate(d, { day: 'numeric', month: 'long', year: 'numeric' });
+  $('#view').innerHTML = `
+    <div class="head">
+      <div><h1>${esc(dayLabel(d))}</h1><p class="sub">${esc(sub)} · <a href="#entries/${m}">${esc(monthName(m))}</a></p></div>
+      <div class="nav">
+        <a class="b icon line" href="#day/${addDays(d, -1)}" aria-label="Previous day">${svg('prev')}</a>
+        <a class="b line ${isToday ? 'gap' : ''}" href="#day/${S.today}" ${isToday ? 'tabindex="-1" aria-hidden="true"' : ''}>Today</a>
+        <a class="b icon line" href="#day/${addDays(d, 1)}" aria-label="Next day" ${d >= S.today ? 'hidden' : ''}>${svg('next')}</a>
+      </div>
+    </div>
+    <div class="tiles">
+      <div class="tile spent"><div class="l">Spent</div><div class="v">${money(t.spent)}</div><div class="s">${list.filter(e => e.kind === 'exp').length} items</div></div>
+      <div class="tile earned"><div class="l">Earned</div><div class="v">${money(t.earned, true)}</div><div class="s">&nbsp;</div></div>
+      ${daily ? `<div class="tile"><div class="l">Daily budget</div><div class="v ${t.spent > daily ? 'neg' : 'pos'}">${money(Math.abs(daily - t.spent))}</div><div class="s">${t.spent > daily ? 'over' : 'under'} ${money(daily)}/day</div></div>`
+        : `<div class="tile"><div class="l">Net</div><div class="v ${t.net < 0 ? 'neg' : 'pos'}">${money(t.net, true)}</div><div class="s">&nbsp;</div></div>`}
+      <div class="tile"><div class="l">Month so far</div><div class="v">${money(mtd)}</div><div class="s">spent up to ${esc(fmtDate(d, { day: 'numeric', month: 'short' }))}</div></div>
+    </div>
+    ${spentBy.length > 1 ? `<div class="card"><h2>Where it went</h2>
+      <div class="split">${spentBy.map(c => `<i style="--v:${c.total};--tc:${c.id ? tc(c.name) : '#9a9a92'}" title="${esc(c.name || 'Uncategorized')}: ${money(c.total)}"></i>`).join('')}</div>
+      <div class="cal-legend">${spentBy.map(c => `<span><i style="background:${c.id ? tc(c.name) : '#9a9a92'}"></i>${esc(c.name || 'Uncategorized')} ${money(c.total)}</span>`).join('')}</div></div>` : ''}
+    ${future ? '' : `<button class="b primary add-day" id="addDay" type="button">＋ Add items for ${esc(isToday ? 'today' : fmtDate(d, { day: 'numeric', month: 'short' }))}</button>`}
+    <div class="sec-h"><h2>${list.length ? `${list.length} ${list.length === 1 ? 'entry' : 'entries'}` : ''}</h2></div>
+    <div class="list">${list.map(e => row(e, true)).join('') || `<div class="empty">Nothing on this day${future ? '' : ' yet. Add what you spent with the button above'}.</div>`}</div>`;
+  $('#addDay') && ($('#addDay').onclick = () => openAdd(d));
+  wireRows();
 }
 
 // ---- Overview ----
 function overviewView() {
   const m = S.month, t = totals(S.entries), cur = m === thisMonth();
   const days = daysIn(m), upto = cur ? +S.today.slice(8) : days;
-  const perDay = [...Array(days)].map((_, i) => S.entries.filter(e => e.kind === 'exp' && +e.on_date.slice(8) === i + 1).reduce((a, e) => a + e.amount, 0));
+  const perDay = [...Array(days)].map((_, i) => spentOn(`${m}-${String(i + 1).padStart(2, '0')}`));
   const peak = Math.max(1, ...perDay);
   const spentBy = byCategory('exp'), earnedBy = byCategory('earn');
   const top = Object.values(S.entries.filter(e => e.kind === 'exp').reduce((g, e) => {
@@ -243,28 +366,28 @@ function overviewView() {
   }, {})).sort((a, b) => b.total - a.total).slice(0, 5);
   const prev = S.months.find(x => x.month === addMonths(m, -1));
   const vsPrev = prev && prev.spent ? Math.round((t.spent - prev.spent) * 100 / prev.spent) : null;
+  const busiest = perDay.indexOf(Math.max(...perDay));
   const budget = S.budget ? `<div class="card budget">
       <div class="top-l"><span>Budget ${money(S.budget)}</span><span class="${t.spent > S.budget ? 'neg' : 'muted'}">${t.spent > S.budget ? money(t.spent - S.budget) + ' over' : money(S.budget - t.spent) + ' left'}</span></div>
       <div class="meter" style="--tc:${t.spent > S.budget ? 'var(--bad)' : t.spent * 100 >= S.budget * 80 ? 'var(--deep)' : 'var(--ok)'}"><i style="--v:${pct(t.spent, S.budget)}"></i></div>
-      <p class="hint">${pct(t.spent, S.budget)}% used${cur && upto < days ? ` · ${days - upto} days left in the month` : ''}</p></div>` : '';
-  const catList = (list, kind, peak = Math.max(1, ...list.map(x => x.total))) => list.map(c => `<a class="mrow" href="#entries/${m}/${c.id}">
+      <p class="hint">${pct(t.spent, S.budget)}% used${cur && upto < days ? ` · ${days - upto} days left · ${S.budget > t.spent ? `about ${money(Math.floor((S.budget - t.spent) / (days - upto) / 100) * 100)} a day keeps you inside it` : 'already over'}` : ''}</p></div>` : '';
+  const catList = (list, kind, top = Math.max(1, ...list.map(x => x.total))) => list.map(c => `<a class="mrow" href="#entries/${m}/${c.id}">
       <span class="ml"><span class="dot" style="--tc:${c.id ? tc(c.name) : '#9a9a92'}"></span>${c.id ? esc(c.name) : '<i>Uncategorized</i>'}</span>
-      <div class="meter" style="--tc:${c.id ? tc(c.name) : '#9a9a92'}"><i style="--v:${pct(c.total, peak)}"></i></div>
-      <span class="mv ${kind === 'earn' ? 'pos' : ''}">${money(c.total, kind === 'earn')}<small>${c.count} ${c.count === 1 ? 'entry' : 'entries'}</small></span></a>`).join('');
+      <div class="meter" style="--tc:${c.id ? tc(c.name) : '#9a9a92'}"><i style="--v:${pct(c.total, top)}"></i></div>
+      <span class="mv ${kind === 'earn' ? 'pos' : ''}">${money(c.total, kind === 'earn')}<small>${c.count} ${c.count === 1 ? 'entry' : 'entries'} · ${pct(c.total, kind === 'earn' ? t.earned : t.spent)}%</small></span></a>`).join('');
 
   $('#view').innerHTML = `
     ${head('overview', monthName(m), cur ? `So far this month · day ${upto} of ${days}` : `${S.entries.length} entries`)}
-    ${quickAddHtml()}
     <div class="tiles">
       <div class="tile spent"><div class="l">Spent</div><div class="v">${money(t.spent)}</div><div class="s">${vsPrev === null ? '&nbsp;' : `${vsPrev > 0 ? '▲' : vsPrev < 0 ? '▼' : ''} ${Math.abs(vsPrev)}% vs ${esc(monthName(addMonths(m, -1), true))}`}</div></div>
       <div class="tile earned"><div class="l">Earned</div><div class="v">${money(t.earned, true)}</div><div class="s">${earnedBy.length ? `${earnedBy.reduce((a, c) => a + c.count, 0)} entries` : '&nbsp;'}</div></div>
-      <div class="tile"><div class="l">Net</div><div class="v ${t.net < 0 ? 'neg' : 'pos'}">${money(t.net, true)}</div><div class="s">${t.net < 0 ? 'spent more than earned' : 'saved'}</div></div>
-      <div class="tile"><div class="l">Per day</div><div class="v">${money(Math.round(t.spent / Math.max(1, upto) / 100) * 100)}</div><div class="s">average spend</div></div>
+      <div class="tile"><div class="l">Net</div><div class="v ${t.net < 0 ? 'neg' : 'pos'}">${money(t.net, true)}</div><div class="s">${t.earned ? `${t.net < 0 ? 'spent more than earned' : `saved ${pct(t.net, t.earned)}% of income`}` : '&nbsp;'}</div></div>
+      <div class="tile"><div class="l">Per day</div><div class="v">${money(Math.round(t.spent / Math.max(1, upto) / 100) * 100)}</div><div class="s">${perDay[busiest] ? `biggest: ${esc(fmtDate(`${m}-${String(busiest + 1).padStart(2, '0')}`, { day: 'numeric', month: 'short' }))}` : 'average spend'}</div></div>
     </div>
     ${budget}
     ${S.entries.length ? `
     <div class="card"><h2>Spending by day</h2>
-      <div class="bars">${perDay.map((v, i) => { const d = `${m}-${String(i + 1).padStart(2, '0')}`; return `<a class="barcol ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" href="#entries/${m}" title="${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}: ${money(v)}">
+      <div class="bars">${perDay.map((v, i) => { const d = `${m}-${String(i + 1).padStart(2, '0')}`; return `<a class="barcol ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" href="#day/${d}" title="${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}: ${money(v)}">
         <span class="bt"><i style="--v:${pct(v, peak)}"></i></span><span class="bl ${(i + 1) % 5 && i ? 'hide' : ''}">${i + 1}</span></a>`; }).join('')}</div>
     </div>
     <div class="grid2">
@@ -273,41 +396,7 @@ function overviewView() {
         ${earnedBy.length ? `<div class="card"><h2>Earned by category</h2>${catList(earnedBy, 'earn')}</div>` : ''}
         ${top.length ? `<div class="card"><h2>Top spends</h2>${top.map(x => `<div class="mrow"><span class="ml">${esc(x.name)}</span><span class="muted small">${x.count}×</span><span class="mv">${money(x.total)}</span></div>`).join('')}</div>` : ''}
       </div>
-    </div>` : `<div class="empty">Nothing recorded in ${esc(monthName(m))}.${cur ? '' : ' Fill it in with the box above: end with a date like <b>24 ' + esc(fmtDate(m + '-01', { month: 'short' }).toLowerCase()) + '</b>.'}</div>`}`;
-  wireQuickAdd();
-}
-
-// ---- Entries ----
-function entriesView(_, cat) {
-  const m = S.month;
-  const catId = cat === undefined || cat === '' ? null : +cat;
-  const catName = catId === null ? '' : catId ? (S.categories.find(c => c.id === catId) || {}).name || 'Category' : 'Uncategorized';
-  const q = query.trim().toLowerCase();
-  const list = S.entries.filter(e => (kindFilter === 'all' || e.kind === kindFilter)
-    && (catId === null || (e.category_id || 0) === catId)
-    && (!q || (e.name || '').toLowerCase().includes(q) || (e.category || '').toLowerCase().includes(q)));
-  const t = totals(list);
-  const groups = {};
-  list.forEach(e => (groups[e.on_date] = groups[e.on_date] || []).push(e));
-  const base = `#entries/${m}`;
-  $('#view').innerHTML = `
-    ${head('entries', catName || 'Entries', `${esc(monthName(m))} · ${list.length} ${list.length === 1 ? 'entry' : 'entries'} · spent ${money(t.spent)}${t.earned ? ` · earned ${money(t.earned, true)}` : ''}`)}
-    <div class="chips" role="group" aria-label="Filter">
-      ${[['all', 'All'], ['exp', 'Spent'], ['earn', 'Earned']].map(([k, l]) => `<button class="chip" data-kind-f="${k}" aria-pressed="${kindFilter === k}">${l}</button>`).join('')}
-      ${catId !== null ? `<a class="chip" aria-pressed="true" href="${base}">${esc(catName)} ✕</a>` : ''}
-    </div>
-    <input class="search" id="q" type="search" placeholder="Search this month" value="${esc(query)}" aria-label="Search">
-    ${Object.keys(groups).sort().reverse().map(d => { const dt = totals(groups[d]); return `
-      <div class="day-h"><b>${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}${d === S.today ? ' · today' : ''}</b>
-        <span>${dt.spent ? money(dt.spent) : ''}${dt.spent && dt.earned ? ' · ' : ''}${dt.earned ? `<span class="pos">${money(dt.earned, true)}</span>` : ''}</span></div>
-      <div class="list">${groups[d].map(row).join('')}</div>`; }).join('')
-      || `<div class="empty">${S.entries.length ? 'Nothing matches.' : `Nothing recorded in ${esc(monthName(m))}.`}</div>`}`;
-  $$('[data-kind-f]').forEach(b => b.onclick = () => { kindFilter = b.dataset.kindF; render(); });
-  $('#q').oninput = e => {
-    query = e.target.value; render();
-    const el = $('#q'); el.focus(); el.setSelectionRange(el.value.length, el.value.length);
-  };
-  wireRows();
+    </div>` : `<div class="empty">Nothing recorded in ${esc(monthName(m))}. Add entries from the Entries tab.</div>`}`;
 }
 
 // ---- Categories ----
@@ -328,7 +417,7 @@ function categoriesView() {
         <div class="meter" style="--tc:${r.id ? tc(r.name) : '#9a9a92'}"><i style="--v:${pct(r.s.total, peak)}"></i></div>
         <span class="mv">${r.s.total || !r.e.total ? money(r.s.total) : ''}${r.e.total ? `<span class="pos">${r.s.total ? ' · ' : ''}${money(r.e.total, true)}</span>` : ''}<small>${r.s.count + r.e.count} ${r.s.count + r.e.count === 1 ? 'entry' : 'entries'}</small></span></a>`).join('')
       || `<p class="muted small">Nothing recorded in ${esc(monthName(m))}.</p>`}</div>
-    ${idle.length ? `<p class="muted small" style="margin:12px 2px 6px">Not used this month</p><div class="chips" style="flex-wrap:wrap">${idle.map(c => `<span class="chip" style="cursor:default"><span class="dot" style="--tc:${tc(c.name)}"></span>${esc(c.name)}</span>`).join('')}</div>` : ''}
+    ${idle.length ? `<p class="muted small" style="margin:12px 2px 6px">Not used this month</p><div class="chips wrap">${idle.map(c => `<span class="chip" style="cursor:default"><span class="dot" style="--tc:${tc(c.name)}"></span>${esc(c.name)}</span>`).join('')}</div>` : ''}
     <p class="hint" style="margin-top:10px">Rename or delete categories in Settings.</p>`;
 }
 
@@ -346,14 +435,14 @@ function monthsView() {
       <div class="tile"><div class="l">Net, all time</div><div class="v ${all.earned - all.spent < 0 ? 'neg' : 'pos'}">${money(all.earned - all.spent, true)}</div></div>
       <div class="tile"><div class="l">Average month</div><div class="v">${money(avg)}</div><div class="s">spent, over ${list.length} months</div></div>
     </div>
-    <div class="card">${list.map(x => `<a class="mon ${x.month === thisMonth() ? 'cur' : ''}" href="#overview/${x.month}">
+    <div class="card">${list.map(x => `<a class="mon ${x.month === thisMonth() ? 'cur' : ''}" href="#entries/${x.month}">
       <span class="mn"><b>${esc(monthName(x.month, true))}</b><span>${x.count} entries</span></span>
       <span class="pair">
         <span class="pl"><span class="meter" style="--tc:var(--spend)"><i style="--v:${pct(x.spent, peak)}"></i></span><span>${money(x.spent)}</span></span>
         <span class="pl"><span class="meter" style="--tc:var(--ok)"><i style="--v:${pct(x.earned, peak)}"></i></span><span class="pos">${money(x.earned, true)}</span></span>
       </span>
       <span class="net ${x.earned - x.spent < 0 ? 'neg' : 'pos'}">net ${money(x.earned - x.spent, true)}</span></a>`).join('')}</div>`
-      : '<div class="empty">No entries yet. Add one on Overview.</div>'}`;
+      : '<div class="empty">No entries yet. Add one on Entries.</div>'}`;
 }
 
 // ---- Settings ----
@@ -369,7 +458,7 @@ function settingsView() {
           <div><label for="sCur">Currency</label><input id="sCur" maxlength="3" value="${esc(S.currency)}" required></div>
           <div><label for="sTz">Timezone</label><select id="sTz">${tzs.map(z => `<option ${z === S.tz ? 'selected' : ''}>${esc(z)}</option>`).join('')}</select></div>
         </div>
-        <p class="hint">The budget shows as a bar on Overview for every month. Leave it empty to switch it off. Timezone decides what counts as today.</p>
+        <p class="hint">The budget shows as a bar on Overview and a daily allowance on each day. Leave it empty to switch it off. Timezone decides what counts as today, and the times shown on entries.</p>
         <div class="acts"><button class="b primary" type="submit">Save</button></div>
       </form>
     </div>
@@ -377,7 +466,7 @@ function settingsView() {
       <h2>Categories</h2>
       ${S.categories.map(c => `<div class="srow"><div class="tx"><b><span class="dot" style="--tc:${tc(c.name)}"></span> ${esc(c.name)}</b><span>${c.count} ${c.count === 1 ? 'entry' : 'entries'}, all time</span></div>
         <div class="acts" style="margin:0"><button class="b sm line" data-ren="${c.id}">Rename</button><button class="b sm warn" data-delcat="${c.id}">Delete</button></div></div>`).join('')
-        || '<p class="muted small">No categories yet. Type one when adding, like <b>#food</b>.</p>'}
+        || '<p class="muted small">No categories yet. Pick “New category” when adding, or type <b>#food</b>.</p>'}
     </div>
     ${S.me.admin ? peopleCard() : ''}
     <div class="card">
@@ -433,7 +522,7 @@ function settingsView() {
 let A = null;            // /api/admin
 let freshLink = '';      // the invite just made, shown until the next one
 const absLink = p => location.origin + p;
-const ago = iso => { const d = Math.round((Date.now() - Date.parse(iso)) / 864e5); return d <= 0 ? 'today' : d === 1 ? 'yesterday' : `${d} days ago`; };
+const ago = isoStr => { const d = Math.round((Date.now() - Date.parse(isoStr)) / 864e5); return d <= 0 ? 'today' : d === 1 ? 'yesterday' : `${d} days ago`; };
 async function loadAdmin() {
   try { A = await api('/api/admin'); } catch (e) { if (e.status === 401) return showLogin(); toast(e.message, true); return; }
   if (route()[0] === 'settings') render();
@@ -494,50 +583,148 @@ async function copy(text, msg) {
   try { await navigator.clipboard.writeText(text); toast(msg); } catch (e) { toast('Copy failed — long-press the link to copy it', true); }
 }
 
-// ---- add / edit ----
-const E = { entry: null, kind: 'exp' };
-function paintKind() { $$('[data-kind]').forEach(b => b.setAttribute('aria-pressed', b.dataset.kind === E.kind)); }
-$$('[data-kind]').forEach(b => b.onclick = () => { E.kind = b.dataset.kind; paintKind(); });
-
-function openEdit(e) {
-  E.entry = e || null;
-  E.kind = e ? e.kind : 'exp';
-  // a new entry lands in the month being viewed: today, or that month's last day
-  const day = S.month === thisMonth() ? S.today : S.month < thisMonth() ? `${S.month}-${String(daysIn(S.month)).padStart(2, '0')}` : S.today;
-  $('#editTitle').textContent = e ? 'Edit entry' : 'New entry';
-  $('#fAmount').value = e ? e.amount / 100 : '';
-  $('#fDate').value = e ? e.on_date : day;
-  $('#fName').value = e ? e.name : '';
-  $('#fCat').value = e ? e.category || '' : '';
-  $('#catList').innerHTML = S.categories.map(c => `<option value="${esc(c.name)}">`).join('');
-  $('#fDelete').hidden = !e;
-  $('#editErr').hidden = true;
-  paintKind();
-  $('#edit').showModal();
-  if (!e) $('#fAmount').focus();
+// ---- the form: several items for one day, or one entry to edit ----
+const F = { entry: null };   // the entry being edited; null when adding
+const NEW = '__new';
+// a new entry lands where you're looking: that day, today, or a past month's last day
+function defaultDay() {
+  const [name, arg] = route();
+  if (name === 'day' && arg[0] <= S.today) return arg[0];
+  return S.month < thisMonth() ? `${S.month}-${String(daysIn(S.month)).padStart(2, '0')}` : S.today;
 }
-$('#fab').onclick = () => openEdit(null);
+function catOptions(sel) {
+  const known = S.categories.some(c => c.name.toLowerCase() === (sel || '').toLowerCase());
+  return `<option value="">No category</option>
+    ${S.categories.map(c => `<option value="${esc(c.name)}" ${known && c.name.toLowerCase() === sel.toLowerCase() ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+    <option value="${NEW}" ${sel && !known ? 'selected' : ''}>＋ New category…</option>`;
+}
+function itemHtml(it = {}) {
+  const kind = it.kind || 'exp', cat = it.category || '';
+  const isNew = cat && !S.categories.some(c => c.name.toLowerCase() === cat.toLowerCase());
+  return `<div class="item" data-kind="${kind}">
+    <button type="button" class="kb ${kind}" aria-label="${kind === 'earn' ? 'Earned: tap for spent' : 'Spent: tap for earned'}">${kind === 'earn' ? '+' : '−'}</button>
+    <input class="ia" inputmode="decimal" placeholder="Amount" aria-label="Amount" value="${it.amount ? it.amount / 100 : ''}" enterkeyhint="next">
+    <input class="in" maxlength="100" placeholder="What for" aria-label="What for" value="${esc(it.name || '')}" enterkeyhint="next">
+    <select class="ic" aria-label="Category">${catOptions(cat)}</select>
+    <input class="inew" maxlength="32" placeholder="New category name" aria-label="New category name" value="${isNew ? esc(cat) : ''}" ${isNew ? '' : 'hidden'}>
+    <button type="button" class="rm" aria-label="Remove this item">✕</button>
+  </div>`;
+}
+function readItem(el) {
+  const sel = $('.ic', el).value;
+  return { kind: el.dataset.kind, amount: $('.ia', el).value.replace(/[,\s₹$]/g, ''), name: $('.in', el).value.trim(),
+    category: sel === NEW ? $('.inew', el).value.trim() : sel, newCat: sel === NEW };
+}
+const blank = it => !it.amount && !it.name;
+function addItem(it, focus) {
+  $('#items').insertAdjacentHTML('beforeend', itemHtml(it));
+  paintTotal();
+  if (focus) $('#items .item:last-child .ia').focus();
+}
+function paintTotal() {
+  const items = $$('#items .item').map(readItem).filter(i => !blank(i));
+  let spent = 0, earned = 0;
+  items.forEach(i => (i.kind === 'earn' ? (earned += paise(i.amount)) : (spent += paise(i.amount))));
+  $('#fTotal').innerHTML = !F.entry && items.length ? `<span>${items.length} ${items.length === 1 ? 'item' : 'items'}</span>${spent ? `<span>Spent ${money(spent)}</span>` : ''}${earned ? `<span class="pos">Earned ${money(earned, true)}</span>` : ''}` : '';
+  $('#fSave').textContent = F.entry ? 'Save' : items.length > 1 ? `Save ${items.length} items` : 'Save';
+  $$('#items .rm').forEach(b => (b.hidden = !!F.entry));
+}
+function paintRecent() {
+  $('#recent').innerHTML = S.recent.map((r, i) => `<button type="button" class="chip sm" data-recent="${i}">${r.category ? `<span class="dot" style="--tc:${tc(r.category)}"></span>` : ''}${esc(r.name)} <span class="${r.kind === 'earn' ? 'pos' : 'muted'}">${money(r.amount, r.kind === 'earn')}</span></button>`).join('');
+  $('#recentBox').hidden = !!F.entry || !S.recent.length;
+}
+function openForm(title, sub, day, items) {
+  $('#editTitle').textContent = title;
+  $('#editSub').textContent = sub;
+  $('#editSub').className = 'small muted';
+  $('#fDate').value = day;
+  $('#fDate').max = addDays(S.today, 7);
+  $('#items').innerHTML = '';
+  items.forEach(it => addItem(it));
+  $('#addRow').hidden = $('#rowHint').hidden = !!F.entry;
+  $('#fDelete').hidden = !F.entry;
+  $('#editErr').hidden = true;
+  $('#edit').classList.toggle('wide', !F.entry);
+  paintRecent(); paintTotal();
+  $('#edit').showModal();
+  if (!F.entry) $('#items .ia').focus();
+}
+function openAdd(day) {
+  F.entry = null;
+  openForm('Add items', 'Several things on one day? Add them all here.', day, [{}]);
+}
+function openEdit(e) {
+  F.entry = e;
+  openForm('Edit entry', `Added at ${fmtTime(e.time)}`, e.on_date, [e]);
+}
+$('#fab').onclick = () => openAdd(defaultDay());
 $('#fCancel').onclick = () => $('#edit').close();
+$('#addRow').onclick = () => addItem({}, true);
+$('#items').addEventListener('click', ev => {
+  const item = ev.target.closest('.item');
+  if (ev.target.closest('.kb')) {
+    const k = item.dataset.kind === 'exp' ? 'earn' : 'exp', b = $('.kb', item);
+    item.dataset.kind = k; b.className = 'kb ' + k; b.textContent = k === 'earn' ? '+' : '−';
+    b.setAttribute('aria-label', k === 'earn' ? 'Earned: tap for spent' : 'Spent: tap for earned');
+    paintTotal();
+  } else if (ev.target.closest('.rm')) {
+    if ($$('#items .item').length > 1) item.remove(); else { item.outerHTML = itemHtml(); }
+    paintTotal();
+  }
+});
+$('#items').addEventListener('change', ev => {
+  if (!ev.target.matches('.ic')) return;
+  const box = $('.inew', ev.target.closest('.item'));
+  box.hidden = ev.target.value !== NEW;
+  if (!box.hidden) box.focus();
+});
+$('#items').addEventListener('input', paintTotal);
+// Enter moves on: amount → what for → the next item (made if needed). Save is the button.
+$('#items').addEventListener('keydown', ev => {
+  if (ev.key !== 'Enter' || ev.target.tagName !== 'INPUT') return;
+  ev.preventDefault();
+  const item = ev.target.closest('.item');
+  if (ev.target.matches('.ia')) return $('.in', item).focus();
+  if (F.entry) return $('#editForm').requestSubmit();
+  const next = item.nextElementSibling;
+  if (next) $('.ia', next).focus(); else if (!blank(readItem(item))) addItem({}, true);
+});
+$('#recent').addEventListener('click', ev => {
+  const b = ev.target.closest('[data-recent]');
+  if (!b) return;
+  const r = S.recent[+b.dataset.recent];
+  const free = $$('#items .item').find(el => blank(readItem(el)));
+  if (free) free.outerHTML = itemHtml(r); else addItem(r);
+  paintTotal();
+  b.animate([{ transform: 'scale(.92)' }, { transform: 'none' }], 160);
+});
 $('#editForm').onsubmit = ev => {
   ev.preventDefault();
-  const body = { kind: E.kind, amount: $('#fAmount').value.replace(/[,\s₹]/g, ''), on_date: $('#fDate').value, name: $('#fName').value, category: $('#fCat').value };
+  const fail = m => { $('#editErr').textContent = m; $('#editErr').hidden = false; };
+  const items = $$('#items .item').map(readItem).filter(i => F.entry || !blank(i));
+  const day = $('#fDate').value;
+  if (!items.length) return fail('Add at least one item.');
+  const bad = items.findIndex(i => !(paise(i.amount) > 0));
+  if (bad >= 0) return fail(items.length > 1 ? `Item ${bad + 1} needs an amount.` : 'Type an amount, like 250.');
+  if (items.some(i => i.newCat && !i.category)) return fail('Name the new category, or pick one from the list.');
+  if (!day) return fail('Pick a day.');
+  const body = items.map(({ kind, amount, name, category }) => ({ kind, amount, name, category }));
   busy($('#fSave'), async () => {
-    let saved;
     try {
-      saved = (await api(E.entry ? `/api/entry/${E.entry.id}` : '/api/entry', body)).entry;
+      if (F.entry) await api(`/api/entry/${F.entry.id}`, { ...body[0], on_date: day });
+      else await api('/api/entries', { on_date: day, items: body });
     } catch (err) {
       if (err.status === 401) throw err;
-      $('#editErr').textContent = err.message; $('#editErr').hidden = false;
-      return;
+      return fail(err.message);
     }
     $('#edit').close();
-    toast(E.entry ? 'Saved' : `Added ${money(saved.amount)}${saved.name ? ' · ' + saved.name : ''}`);
-    if (saved.on_date.slice(0, 7) !== S.month && MONTHLY.includes(route()[0])) location.hash = `#${route()[0]}/${saved.on_date.slice(0, 7)}`;
-    else await refresh(true);
+    const sum = body.reduce((a, i) => a + (i.kind === 'exp' ? paise(i.amount) : 0), 0);
+    toast(F.entry ? 'Saved' : `Added ${body.length} ${body.length === 1 ? 'item' : 'items'}${sum ? ' · ' + money(sum) : ''} · ${dayLabel(day)}`);
+    await showSaved(day);
   });
 };
 $('#fDelete').onclick = () => busy($('#fDelete'), async () => {
-  const e = E.entry;
+  const e = F.entry;
   $('#edit').close();
   if (!await ask('Delete this entry?', `${money(e.amount)}${e.name ? ' · ' + e.name : ''} on ${fmtDate(e.on_date, { day: 'numeric', month: 'short' })}. This can’t be undone.`, 'Delete', true)) return;
   await api(`/api/entry/${e.id}/delete`, {});

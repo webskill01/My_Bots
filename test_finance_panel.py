@@ -178,3 +178,46 @@ def test_http_login_then_month_state(pconn):
         assert call("/api/entry", {"kind": "exp"}, cookie)[0] == 400   # validation, not a crash
     finally:
         srv.shutdown()
+
+
+# --- several items at once, times, recent items -----------------------------
+
+def test_several_items_for_one_day_are_saved_together(pconn):
+    day = db.user_today(me(pconn)).isoformat()
+    _, out = panel.act(pconn, me(pconn), "/api/entries", {"on_date": day, "items": [
+        {"kind": "exp", "amount": "20", "name": "chai", "category": "Food"},
+        {"kind": "exp", "amount": "150.50", "name": "auto", "category": "Brand New"},
+        {"kind": "earn", "amount": "500", "name": "refund", "category": ""},
+    ]})
+    assert [(e["name"], e["amount"], e["category"], e["on_date"]) for e in out["entries"]] == [
+        ("chai", 2000, "Food", day), ("auto", 15050, "Brand New", day), ("refund", 50000, None, day)]
+    assert "Brand New" in [c["name"] for c in db.category_counts(pconn, TG)]   # in the dropdown next time
+
+
+@pytest.mark.parametrize("items", [[], "x", [{"kind": "exp", "amount": "1"}] * 31,
+                                   [{"kind": "exp", "amount": "20"}, {"kind": "exp", "amount": ""}]])
+def test_several_items_are_all_or_nothing(pconn, items):
+    with pytest.raises(ValueError):
+        panel.act(pconn, me(pconn), "/api/entries", {"on_date": "2026-10-01", "items": items})
+    assert db.count_entries(pconn, TG, "2000-01-01", "2100-01-01") == 0
+
+
+def test_entries_carry_the_time_they_were_filed_in_the_users_timezone(pconn):
+    eid = db.add_entry(pconn, TG, "exp", 100, "x", None, "2026-09-01")
+    pconn.execute("UPDATE entry SET created_at = '2026-09-01T16:11:25+00:00' WHERE id = ?", (eid,))
+    assert panel.entry_json(db.get_entry(pconn, TG, eid), "Asia/Kolkata")["time"] == "21:41"
+    pconn.execute("UPDATE entry SET created_at = '2026-09-01T16:11:25' WHERE id = ?", (eid,))   # legacy naive
+    assert panel.entry_json(db.get_entry(pconn, TG, eid), "Asia/Kolkata")["time"] == "21:41"
+
+
+def test_recent_items_are_the_most_logged_with_their_latest_amount(pconn):
+    today = db.user_today(me(pconn))
+    food = db.create_category(pconn, TG, "Food")
+    for amt in (1500, 2000, 2500):   # newest last
+        db.add_entry(pconn, TG, "exp", amt, "Chai", food, today)
+    db.add_entry(pconn, TG, "exp", 9000, "uber", None, today)
+    db.add_entry(pconn, TG, "exp", 100, "", None, today)                       # unnamed: skipped
+    db.add_entry(pconn, TG, "exp", 100, "ancient", None, today - dt.timedelta(days=200))
+    recent = panel.recent_items(pconn, TG, today, "Asia/Kolkata")
+    assert [(r["name"], r["amount"], r["category"], r["n"]) for r in recent] == [
+        ("Chai", 2500, "Food", 3), ("uber", 9000, None, 1)]

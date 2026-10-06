@@ -25,7 +25,7 @@ import urllib.parse
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from zoneinfo import available_timezones
+from zoneinfo import ZoneInfo, available_timezones
 
 # Same login machinery as the schedule panel: one implementation to trust.
 from schedule_bot.panel import _JOIN, _NAME, _cookie, _token_hash, check_pw, hash_pw, valid_password
@@ -45,6 +45,8 @@ STATIC = {  # path -> (file, content type)
 INVITE_DAYS = 7
 SESSION_MAX_AGE = 365 * 86400
 MAX_AMOUNT = 100_000_000_00      # ₹10 crore in paise: anything bigger is a typo
+MAX_ITEMS = 30                   # per multi-item save
+RECENT_DAYS = 90                 # how far back "recent items" look
 FUTURE_DAYS = 7                  # an entry may sit this far ahead (a bill due soon)
 
 AUTH = {"pin": "", "admin": "admin"}
@@ -89,10 +91,30 @@ def new_session(conn, user_id: int) -> str:
 
 # --- shapes -----------------------------------------------------------------
 
-def entry_json(e) -> dict:
+def entry_json(e, tz: str) -> dict:
+    """`time` is when it was filed, on the user's clock: "14:05"."""
+    filed = dt.datetime.fromisoformat(e["created_at"])
+    if filed.tzinfo is None:   # legacy naive stamps are UTC
+        filed = filed.replace(tzinfo=dt.timezone.utc)
     return {"id": e["id"], "kind": e["kind"], "amount": e["amount"], "name": e["name"],
             "category": e["category_name"], "category_id": e["category_id"],
-            "on_date": e["on_date"]}
+            "on_date": e["on_date"], "time": filed.astimezone(ZoneInfo(tz)).strftime("%H:%M")}
+
+
+def recent_items(conn, uid: int, today: dt.date, tz: str, limit: int = 10) -> list[dict]:
+    """What this person logs most often lately (chai, uber, rent), each with
+    its last amount and category: one tap in the form fills a row."""
+    seen: dict[tuple, dict] = {}
+    for e in db.list_entries(conn, uid, today - dt.timedelta(days=RECENT_DAYS), today):
+        if not e["name"]:
+            continue
+        key = (e["kind"], e["name"].lower())
+        if key in seen:
+            seen[key]["n"] += 1
+        else:   # newest first, so the first one seen carries the latest amount
+            seen[key] = {"kind": e["kind"], "name": e["name"], "amount": e["amount"],
+                         "category": e["category_name"], "n": 1}
+    return sorted(seen.values(), key=lambda x: -x["n"])[:limit]
 
 
 def month_bounds(month: str) -> tuple[dt.date, dt.date]:
@@ -114,9 +136,10 @@ def state(conn, user, month: str | None) -> dict:
         "budget": user["budget"],
         "me": {"name": user["name"], "admin": bool(user["is_admin"]),
                "has_password": bool(user["pw_hash"])},
-        "entries": [entry_json(e) for e in db.list_entries(conn, uid, start, end)],
+        "entries": [entry_json(e, user["tz"]) for e in db.list_entries(conn, uid, start, end)],
         "months": [dict(m) for m in db.month_totals(conn, uid)],
         "categories": [dict(c) for c in db.category_counts(conn, uid)],
+        "recent": recent_items(conn, uid, today, user["tz"]),
     }
 
 
@@ -327,12 +350,26 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
             raise ValueError("That amount looks too big")
         eid = db.add_entry(conn, uid, p.kind, p.amount, p.name[:100],
                            _category_id(conn, uid, p.category), p.on_date)
-        return 200, {"entry": entry_json(db.get_entry(conn, uid, eid))}
+        return 200, {"entry": entry_json(db.get_entry(conn, uid, eid), user["tz"])}
+
+    if path == "/api/entries":   # several items for one day, all or nothing
+        items = b.get("items")
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_ITEMS:
+            raise ValueError(f"Add 1 to {MAX_ITEMS} items")
+        for i, item in enumerate(items, 1):   # check every amount before writing anything
+            try:
+                _amount(item.get("amount"))
+            except ValueError as e:
+                raise ValueError(f"Item {i}: {e}") from None
+        rows = [fields_from(conn, uid, dict(item, on_date=b.get("on_date")), today) for item in items]
+        ids = [db.add_entry(conn, uid, f["kind"], f["amount"], f["name"], f["category_id"], f["on_date"])
+               for f in rows]
+        return 200, {"entries": [entry_json(db.get_entry(conn, uid, i), user["tz"]) for i in ids]}
 
     if path == "/api/entry":
         f = fields_from(conn, uid, b, today)
         eid = db.add_entry(conn, uid, f["kind"], f["amount"], f["name"], f["category_id"], f["on_date"])
-        return 200, {"entry": entry_json(db.get_entry(conn, uid, eid))}
+        return 200, {"entry": entry_json(db.get_entry(conn, uid, eid), user["tz"])}
 
     if m := re.fullmatch(r"/api/entry/(\d+)(/delete)?", path):
         if db.get_entry(conn, uid, int(m[1])) is None:
@@ -341,7 +378,7 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
             db.delete_entry(conn, uid, int(m[1]))
             return 200, {"ok": True}
         db.update_entry(conn, uid, int(m[1]), **fields_from(conn, uid, b, today))
-        return 200, {"entry": entry_json(db.get_entry(conn, uid, int(m[1])))}
+        return 200, {"entry": entry_json(db.get_entry(conn, uid, int(m[1])), user["tz"])}
 
     if m := re.fullmatch(r"/api/category/(\d+)/(rename|delete)", path):
         if m[2] == "delete":
