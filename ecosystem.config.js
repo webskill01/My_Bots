@@ -29,5 +29,17 @@ module.exports = {
     restart_delay: 5000,
     max_memory_restart: "300M",
     env: { PYTHONUNBUFFERED: "1" },
+  }, {
+    name: "finance-panel",           // web panel, 127.0.0.1:8098; shares finance.db with finance-bot
+    cwd: "/opt/my-bots",
+    script: "/opt/my-bots/.venv/bin/python",
+    args: "-m finance_bot panel",
+    interpreter: "none",
+    instances: 1,
+    exec_mode: "fork",
+    autorestart: true,
+    restart_delay: 5000,
+    max_memory_restart: "300M",
+    env: { PYTHONUNBUFFERED: "1" },
   }],
 };

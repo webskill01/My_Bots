@@ -45,6 +45,10 @@ def main() -> None:
     setup_logging()
 
     load_env()
+    if sys.argv[1:] == ["panel"]:   # python -m finance_bot panel
+        from . import panel
+        panel.serve(os.environ.get("DB_PATH", "finance.db"))
+        return
     token = os.environ.get("BOT_TOKEN")
     if not token:
         sys.exit("BOT_TOKEN is not set. Copy .env.example to .env and paste the "

@@ -32,6 +32,23 @@ CREATE TABLE IF NOT EXISTS entry (
 );
 
 CREATE INDEX IF NOT EXISTS entry_user_date ON entry(user_id, on_date);
+
+-- Web panel logins. Same shape as the schedule panel's, so its account
+-- queries (imported below) work on this database unchanged.
+CREATE TABLE IF NOT EXISTS session (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES user(user_id),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS invite (
+    token      TEXT PRIMARY KEY,
+    label      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_by    INTEGER REFERENCES user(user_id),
+    claim_user INTEGER REFERENCES user(user_id)
+);
 """
 
 # Columns added after the first release. Listed here rather than in SCHEMA so
@@ -42,6 +59,10 @@ _LATER_COLUMNS = [
     ("user", "budget", "INTEGER NOT NULL DEFAULT 0"),   # paise/month, 0 = off
     ("user", "alert_month", "TEXT"),                    # 'YYYY-MM' last alerted
     ("user", "alert_level", "INTEGER NOT NULL DEFAULT 0"),
+    ("user", "name", "TEXT"),                           # panel login; NULL = never logged in
+    ("user", "pw_hash", "TEXT"),                        # NULL for the admin (env PIN)
+    ("user", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
+    ("user", "disabled", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 _SETTINGS = {"tz", "currency", "budget"}
@@ -51,18 +72,21 @@ ANY_CATEGORY = object()  # distinct from None, which means "uncategorized"
 
 
 def connect(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # ON DELETE SET NULL needs this
     return conn
 
 
 def init(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA journal_mode = WAL")   # the panel's threads read while one writes
     conn.executescript(SCHEMA)
     for table, column, decl in _LATER_COLUMNS:
         existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS user_name ON user(name COLLATE NOCASE)"
+                 " WHERE name IS NOT NULL")
     conn.commit()
 
 
@@ -250,9 +274,64 @@ def category_totals(conn, user_id: int, start, end, kind: str = "exp"):
         (user_id, kind, _iso(start), _iso(end))).fetchall()
 
 
+def month_totals(conn, user_id: int):
+    """Spent / earned per calendar month, newest first: the month-by-month view."""
+    return conn.execute(
+        "SELECT substr(on_date, 1, 7) AS month,"
+        "       COALESCE(SUM(CASE WHEN kind = 'exp'  THEN amount END), 0) AS spent,"
+        "       COALESCE(SUM(CASE WHEN kind = 'earn' THEN amount END), 0) AS earned,"
+        "       COUNT(*) AS count"
+        " FROM entry WHERE user_id = ? GROUP BY month ORDER BY month DESC",
+        (user_id,)).fetchall()
+
+
+def category_counts(conn, user_id: int):
+    """Every category with how many entries it holds, all time."""
+    return conn.execute(
+        "SELECT c.id, c.name, COUNT(e.id) AS count FROM category c"
+        " LEFT JOIN entry e ON e.category_id = c.id"
+        " WHERE c.user_id = ? GROUP BY c.id ORDER BY c.name", (user_id,)).fetchall()
+
+
 def record_alert(conn, user_id: int, month: str, level: int) -> None:
     """Remember that we already warned this user, so one budget crossing
     produces one message rather than one per entry."""
     conn.execute("UPDATE user SET alert_month = ?, alert_level = ? WHERE user_id = ?",
                  (month, level, user_id))
     conn.commit()
+
+
+# --- panel accounts ---------------------------------------------------------
+# Sessions, invites, names and passwords live in the same tables the schedule
+# panel uses, so its tested queries run here as-is. Only the ones that count
+# rows (people, unclaimed) or touch push devices are finance's own.
+from schedule_bot.db import (add_invite, add_session, delete_invite, drop_session,  # noqa: E402
+                             get_user, invites, join, make_admin, open_invite,
+                             rename_user, session_user, set_password, user_by_name)
+
+
+def set_disabled(conn, user_id: int, disabled: bool) -> bool:
+    """The admin can't be disabled: that would lock everyone out of admin."""
+    cur = conn.execute("UPDATE user SET disabled = ? WHERE user_id = ? AND is_admin = 0",
+                       (int(disabled), user_id))
+    if disabled:
+        conn.execute("DELETE FROM session WHERE user_id = ?", (user_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def people(conn):
+    """Everyone with a login, for the admin's list. Counts only, never money."""
+    return conn.execute(
+        "SELECT u.user_id, u.name, u.is_admin, u.disabled, u.created_at,"
+        " (SELECT COUNT(*) FROM entry e WHERE e.user_id = u.user_id) AS entries"
+        " FROM user u WHERE u.name IS NOT NULL ORDER BY u.is_admin DESC, u.created_at").fetchall()
+
+
+def unclaimed(conn):
+    """Telegram-era ledgers with no login yet, waiting for a claim link."""
+    return conn.execute(
+        "SELECT u.user_id, u.created_at,"
+        " (SELECT COUNT(*) FROM entry e WHERE e.user_id = u.user_id) AS entries"
+        " FROM user u WHERE u.name IS NULL AND u.is_admin = 0 AND u.disabled = 0"
+        " ORDER BY u.created_at").fetchall()

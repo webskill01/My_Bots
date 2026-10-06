@@ -54,6 +54,22 @@ offset it. It resets on the 1st.
 Send them the bot link. That's it. Data is keyed on Telegram user ID, so nobody
 sees anyone else's entries.
 
+## Web panel (replaces the bot)
+
+https://finance.easebuilds.in. Run with `python -m finance_bot panel`; it serves
+on `127.0.0.1:FINANCE_PORT` (8098) behind nginx, from the same `finance.db`.
+
+Every view is per month with ◀ / ▶ to step back: Overview (spent, earned,
+net, budget, spending by day, by category), Entries, Categories, and Months
+(every month side by side). The add box takes the same text as the bot
+(`250 chai #food 24 aug`); the + button opens a form.
+
+Accounts work like the Schedule panel: admin logs in as `admin` with
+`FINANCE_PIN` (falls back to `SCHEDULE_PIN`), then sets their own password.
+The oldest Telegram ledger is the admin's (override with `FINANCE_USER_ID`);
+other Telegram ledgers show under Settings → People → "Waiting to be claimed",
+and a claim link hands one over with all its history.
+
 ## Tests
 
 ```
