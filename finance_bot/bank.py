@@ -162,7 +162,8 @@ def start(db_path: str, user_id: int) -> bool:
         log.info("bank sync off: set GMAIL_USER and GMAIL_APP_PASSWORD to turn it on")
         return False
     conn = db.connect(db_path)
-    db.get_or_create_category(conn, user_id, SALARY)   # ready to pick when it lands
+    for name in (SALARY, UNCLAIMED, REFUND, SPLIT):     # ready to pick before the first alert
+        db.get_or_create_category(conn, user_id, name)
     conn.close()
     STATUS["on"] = True
     threading.Thread(target=_run, args=(db_path, user_id, (user, password),
