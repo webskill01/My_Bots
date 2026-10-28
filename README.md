@@ -1,18 +1,18 @@
-# Finance Tracker Bot
+# Finance Panel
 
-A Telegram bot for tracking expenses and daily earnings. Multi-tenant — every
-Telegram user who starts it gets their own private ledger.
+A web panel for expenses and earnings at https://finance.easebuilds.in. Run with
+`python -m finance_bot`. It serves on `127.0.0.1:FINANCE_PORT` (8098) behind
+nginx, from `finance.db`. The panel always opens on Entries.
 
 ## Setup
 
-1. Talk to [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token.
-2. `cp .env.example .env` and paste the token into `BOT_TOKEN=`.
-3. `pip install -r requirements.txt`
-4. `python -m finance_bot`
+1. `cp .env.example .env`, set `FINANCE_PIN` (and the Gmail keys below).
+2. `pip install -r requirements.txt`
+3. `python -m finance_bot`
 
 ## Adding entries
 
-Just send a message. No command needed.
+Type in the add box, or use the + button for a form.
 
 | You type | Result |
 |---|---|
@@ -24,51 +24,48 @@ Just send a message. No command needed.
 | `+3000 client 24/8` | earning dated 24 August |
 | `250 auto 2d` | dated 2 days ago |
 
-Order is flexible: `250 chai #food 24 aug` works. A `+` means earning, anything
-else is an expense. Dates accept `today`, `yesterday`, `Nd`, `24/8`,
-`24/08/2026`, `24 aug`, `24 august`, and `aug 24`.
+Order is flexible. A `+` means earning, anything else is an expense.
 
-## Commands
+Views are per month with ◀ / ▶: Entries, Overview (spent, earned, net, budgets,
+salary, taxi bot, spending by day and category), Categories, Months.
 
-Each screen has its own command, and all of them show up when you type `/`.
-`/menu` opens the same screens as buttons.
+## Bank sync (Canara alert emails)
 
-- **/summary** — earned, spent, net for a period, plus earnings per category
-- **/day** — one day's total and its full entry list
-- **/entries** — every entry, paged, tap to edit or delete
-- **/categories** — earned and spent per category, tap for that category's list
-- **/earn** — guided path if you'd rather tap than type
-- **/settings** — timezone, currency and monthly budget
+A thread inside the panel process polls Gmail over IMAP every 30 s for mail
+from `canarabank@canarabank.com` and adds each UPI/IMPS/NEFT debit or credit
+as an entry (tagged "bank"). It also keeps the balance from the latest alert.
 
-Tag earnings to split income by source: `+3000 payout #sofi`,
-`+1500 driver-bot #taxi`. /summary and /categories then show each one's total.
+- `.env`: `GMAIL_USER`, `GMAIL_APP_PASSWORD` (Google App Password, needs
+  2-Step Verification and IMAP on), `BANK_PARTNER` (partner's UPI as shown in
+  alerts). No Gmail keys = sync off.
+- No history import: the first run only notes where the inbox is and records
+  mail from then on. The bank ref number stops duplicates.
+- An alert it can't read (e.g. a card swipe) shows on Entries as
+  "Couldn't read a bank email". Add it by hand, then dismiss.
 
-## Monthly budget
+Auto categories:
 
-Set one in Settings and the bot warns you twice a month, at most: once when you
-cross 80% of it, and once when you go over. Expenses only — earnings don't
-offset it. It resets on the 1st.
+| Alert | Category |
+|---|---|
+| ₹90 in | Taxi bot unclaimed |
+| ₹90 out, or a whole ₹90s to the partner | Taxi bot refund |
+| any other amount to the partner | Taxi bot split |
 
-## Sharing with friends
+The Taxi bot card shows payments received, refunded, the partner's 50% of
+what's left, what was sent, and what's still owed.
 
-Send them the bot link. That's it. Data is keyed on Telegram user ID, so nobody
-sees anyone else's entries.
+## Salary and budgets
 
-## Web panel (replaces the bot)
+Tag the salary credit "Salary". The Salary card counts spending from the day
+the latest salary landed (taxi bot money excluded) and shows what's left.
 
-https://finance.easebuilds.in. Run with `python -m finance_bot panel`; it serves
-on `127.0.0.1:FINANCE_PORT` (8098) behind nginx, from the same `finance.db`.
+Settings → Categories → Budget sets a monthly limit per category (empty or 0
+clears it). Overview and Categories show progress bars.
 
-Every view is per month with ◀ / ▶ to step back: Overview (spent, earned,
-net, budget, spending by day, by category), Entries, Categories, and Months
-(every month side by side). The add box takes the same text as the bot
-(`250 chai #food 24 aug`); the + button opens a form.
+## Accounts
 
-Accounts work like the Schedule panel: admin logs in as `admin` with
-`FINANCE_PIN` (falls back to `SCHEDULE_PIN`), then sets their own password.
-The oldest Telegram ledger is the admin's (override with `FINANCE_USER_ID`);
-other Telegram ledgers show under Settings → People → "Waiting to be claimed",
-and a claim link hands one over with all its history.
+Admin logs in as `admin` with `FINANCE_PIN` (falls back to `SCHEDULE_PIN`),
+then sets their own password. Bank sync records into the admin's ledger.
 
 ## Tests
 

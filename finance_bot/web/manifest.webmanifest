@@ -2,7 +2,7 @@
   "name": "Finance",
   "short_name": "Finance",
   "description": "Spending and earnings, month by month",
-  "start_url": "/#overview",
+  "start_url": "/#entries",
   "scope": "/",
   "display": "standalone",
   "background_color": "#fbfbf8",

@@ -100,11 +100,12 @@ function byCategory(kind, list = S.entries) {
 }
 const spentOn = d => S.entries.filter(e => e.kind === 'exp' && e.on_date === d).reduce((a, e) => a + e.amount, 0);
 const catTag = e => (e.category ? `<span class="tag" style="--tc:${tc(e.category)}">${esc(e.category)}</span>` : '');
+const bankTag = e => (e.bank ? '<span class="tag" style="--tc:#0b6e76" title="Recorded from a bank alert">bank</span>' : '');
 const byTime = (a, b) => a.time.localeCompare(b.time) || a.id - b.id;
 
 // an entry row; `timed` puts the time it was added in its own column
 function row(e, timed) {
-  const meta = [catTag(e), timed ? '' : `<span>${fmtTime(e.time)}</span>`].filter(Boolean).join('');
+  const meta = [catTag(e), bankTag(e), timed ? '' : `<span>${fmtTime(e.time)}</span>`].filter(Boolean).join('');
   return `<div class="row ${e.kind} ${timed ? 'timed' : ''}" data-open="${e.id}" tabindex="0" style="--tc:${e.category ? tc(e.category) : 'var(--line)'}">
     ${timed ? `<div class="tm">${fmtTime(e.time).replace(' ', '<small>')}</small></div>` : ''}
     <div style="min-width:0"><div class="t1">${esc(e.name) || '<span class="muted">—</span>'}</div>${meta ? `<div class="t2">${meta}</div>` : ''}</div>
@@ -286,6 +287,66 @@ function wireQuickAdd() {
   };
 }
 
+// ---- bank sync: alerts it couldn't read, and trouble reaching Gmail ----
+function bankNotice() {
+  const b = S.bank;
+  if (!b) return '';
+  return b.misses.map(x => `<div class="note warn">Couldn’t read a bank email: <b>${esc(x.subject)}</b>
+      <div class="small" style="font-weight:400;margin-top:4px">${esc(x.body.slice(0, 240))}</div>
+      <div class="acts"><button class="b sm line" data-miss="${x.id}" type="button">Added it by hand · dismiss</button></div></div>`).join('')
+    + (b.error ? `<div class="note warn">Bank sync can’t reach Gmail right now: ${esc(b.error)}</div>` : '');
+}
+function wireBankNotice() {
+  $$('[data-miss]').forEach(btn => btn.onclick = () => busy(btn, async () => {
+    await api(`/api/bank/miss/${btn.dataset.miss}/dismiss`, {}); await refresh(true);
+  }));
+}
+
+// ---- money right now: bank balance, salary left, what the partner is owed ----
+const TAXI_IN = 'taxi bot unclaimed';
+const meterColor = (used, cap) => (used > cap ? 'var(--bad)' : used * 100 >= cap * 80 ? 'var(--deep)' : 'var(--ok)');
+const hasTaxi = () => S.taxi.received_n || S.taxi.sent_n || S.taxi.refunded_n;
+function nowTiles() {
+  const tiles = [];
+  if (S.bank && S.bank.balance != null) tiles.push(`<div class="tile"><div class="l">In the bank</div><div class="v">${money(S.bank.balance)}</div><div class="s">from the latest alert</div></div>`);
+  if (S.salary) tiles.push(`<div class="tile"><div class="l">Salary left</div><div class="v ${S.salary.left < 0 ? 'neg' : 'pos'}">${money(S.salary.left)}</div><div class="s">${money(S.salary.spent)} spent since ${esc(fmtDate(S.salary.on_date, { day: 'numeric', month: 'short' }))}</div></div>`);
+  if (hasTaxi()) tiles.push(`<div class="tile"><div class="l">${S.taxi.owed < 0 ? 'Partner overpaid' : 'Owed to partner'}</div><div class="v">${money(Math.abs(S.taxi.owed))}</div><div class="s">taxi bot, all time</div></div>`);
+  return tiles.length ? `<div class="tiles">${tiles.join('')}</div>` : '';
+}
+function salaryCard() {
+  const s = S.salary;
+  if (!s) return '';
+  return `<div class="card budget">
+    <div class="top-l"><span>Salary ${money(s.amount)} · ${esc(fmtDate(s.on_date, { day: 'numeric', month: 'short' }))}</span><span class="${s.left < 0 ? 'neg' : 'muted'}">${s.left < 0 ? money(-s.left) + ' over' : money(s.left) + ' left'}</span></div>
+    <div class="meter" style="--tc:${meterColor(s.spent, s.amount)}"><i style="--v:${pct(s.spent, s.amount)}"></i></div>
+    <p class="hint">${pct(s.spent, s.amount)}% used since it landed · taxi bot money isn’t counted</p></div>`;
+}
+function taxiCard() {
+  if (!hasTaxi()) return '';
+  const t = S.taxi;
+  const month = S.entries.filter(e => e.kind === 'earn' && (e.category || '').toLowerCase() === TAXI_IN).length;
+  const line = (l, n, v, cls = '') => `<div class="mrow"><span class="ml">${l}</span><span class="muted small">${n}</span><span class="mv ${cls}">${v}</span></div>`;
+  return `<div class="card"><h2>Taxi bot</h2>
+    ${line('Received', `${t.received_n} payments`, money(t.received, true), 'pos')}
+    ${line('Refunded', `${t.refunded_n}×`, money(t.refunded))}
+    ${line('Partner’s half', 'of what’s left', money(t.partner_half))}
+    ${line('Sent to partner', `${t.sent_n}×`, money(t.sent))}
+    ${line(t.owed < 0 ? 'Overpaid' : 'Still owed', '', money(Math.abs(t.owed)), t.owed > 0 ? 'neg' : '')}
+    <p class="hint">All time. ${month} ${month === 1 ? 'payment' : 'payments'} in ${esc(monthName(S.month))}. ₹90 in is filed as “Taxi bot unclaimed”, ₹90 out (or whole ₹90s to your partner) as “Taxi bot refund”, other amounts to your partner as “Taxi bot split”.</p></div>`;
+}
+// categories with their own monthly budget, against this month's spending
+function budgetsCard(spentBy) {
+  const list = S.categories.filter(c => c.budget);
+  if (!list.length) return '';
+  return `<div class="card"><h2>Category budgets</h2>${list.map(c => {
+    const s = (spentBy.find(x => x.id === c.id) || { total: 0 }).total;
+    return `<a class="mrow" href="#entries/${S.month}/${c.id}">
+      <span class="ml"><span class="dot" style="--tc:${tc(c.name)}"></span>${esc(c.name)}</span>
+      <div class="meter" style="--tc:${meterColor(s, c.budget)}"><i style="--v:${pct(s, c.budget)}"></i></div>
+      <span class="mv">${money(s)}<small>of ${money(c.budget)} · ${s > c.budget ? money(s - c.budget) + ' over' : money(c.budget - s) + ' left'}</small></span></a>`;
+  }).join('')}</div>`;
+}
+
 // ---- Entries (home): the month as a calendar, then every entry by day ----
 // The month card on Entries: name, totals, then the calendar. Swipe it (or use
 // the arrow keys / the desktop chevrons) to change month.
@@ -371,6 +432,7 @@ function entriesView(_, cat) {
   list.forEach(e => (groups[e.on_date] = groups[e.on_date] || []).push(e));
   $('#view').innerHTML = `
     ${quickAddHtml()}
+    ${bankNotice()}
     ${catId === null ? monthCard(m) : head('entries', catName, `${esc(monthName(m))} · ${list.length} ${list.length === 1 ? 'entry' : 'entries'} · spent ${money(t.spent)}${t.earned ? ` · earned ${money(t.earned, true)}` : ''}`)}
     <div class="chips" role="group" aria-label="Filter" style="margin-top:14px">
       ${[['all', 'All'], ['exp', 'Spent'], ['earn', 'Earned']].map(([k, l]) => `<button class="chip" data-kind-f="${k}" aria-pressed="${kindFilter === k}">${l}</button>`).join('')}
@@ -388,6 +450,7 @@ function entriesView(_, cat) {
     const el = $('#q'); el.focus(); el.setSelectionRange(el.value.length, el.value.length);
   };
   wireQuickAdd();
+  wireBankNotice();
   wireMonthCard();
   wireRows();
 }
@@ -470,6 +533,7 @@ function overviewView() {
 
   $('#view').innerHTML = `
     ${head('overview', monthName(m), cur ? `So far this month · day ${upto} of ${days}` : `${S.entries.length} entries`)}
+    ${cur ? nowTiles() : ''}
     <div class="tiles">
       <div class="tile spent"><div class="l">Spent</div><div class="v">${money(t.spent)}</div><div class="s">${vsPrev === null ? '&nbsp;' : `${vsPrev > 0 ? '▲' : vsPrev < 0 ? '▼' : ''} ${Math.abs(vsPrev)}% vs ${esc(monthName(addMonths(m, -1), true))}`}</div></div>
       <div class="tile earned"><div class="l">Earned</div><div class="v">${money(t.earned, true)}</div><div class="s">${earnedBy.length ? `${earnedBy.reduce((a, c) => a + c.count, 0)} entries` : '&nbsp;'}</div></div>
@@ -477,6 +541,9 @@ function overviewView() {
       <div class="tile"><div class="l">Per day</div><div class="v">${money(Math.round(t.spent / Math.max(1, upto) / 100) * 100)}</div><div class="s">${perDay[busiest] ? `biggest: ${esc(fmtDate(`${m}-${String(busiest + 1).padStart(2, '0')}`, { day: 'numeric', month: 'short' }))}` : 'average spend'}</div></div>
     </div>
     ${budget}
+    ${budgetsCard(spentBy)}
+    ${cur ? salaryCard() : ''}
+    ${taxiCard()}
     ${S.entries.length ? `
     <div class="card"><h2>Spending by day</h2>
       <div class="bars">${perDay.map((v, i) => { const d = `${m}-${String(i + 1).padStart(2, '0')}`; return `<a class="barcol ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" style="--i:${i}" href="#day/${d}" title="${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}: ${money(v)}">
@@ -504,13 +571,14 @@ function categoriesView() {
   const idle = S.categories.filter(c => !used.has(c.id));
   $('#view').innerHTML = `
     ${head('categories', 'Categories', esc(monthName(m)))}
+    ${budgetsCard(spent)}
     <div class="card">${rows.map(r => `<a class="mrow" href="#entries/${m}/${r.id}">
         <span class="ml"><span class="dot" style="--tc:${r.id ? tc(r.name) : '#9a9a92'}"></span>${r.id ? esc(r.name) : '<i>Uncategorized</i>'}</span>
         <div class="meter" style="--tc:${r.id ? tc(r.name) : '#9a9a92'}"><i style="--v:${pct(r.s.total, peak)}"></i></div>
         <span class="mv">${r.s.total || !r.e.total ? money(r.s.total) : ''}${r.e.total ? `<span class="pos">${r.s.total ? ' · ' : ''}${money(r.e.total, true)}</span>` : ''}<small>${r.s.count + r.e.count} ${r.s.count + r.e.count === 1 ? 'entry' : 'entries'}</small></span></a>`).join('')
       || `<p class="muted small">Nothing recorded in ${esc(monthName(m))}.</p>`}</div>
     ${idle.length ? `<p class="muted small" style="margin:12px 2px 6px">Not used this month</p><div class="chips wrap">${idle.map(c => `<span class="chip" style="cursor:default"><span class="dot" style="--tc:${tc(c.name)}"></span>${esc(c.name)}</span>`).join('')}</div>` : ''}
-    <p class="hint" style="margin-top:10px">Rename or delete categories in Settings.</p>`;
+    <p class="hint" style="margin-top:10px">Rename, delete or set a monthly budget for a category in Settings.</p>`;
 }
 
 // ---- Months: every month side by side ----
@@ -556,8 +624,8 @@ function settingsView() {
     </div>
     <div class="card">
       <h2>Categories</h2>
-      ${S.categories.map(c => `<div class="srow"><div class="tx"><b><span class="dot" style="--tc:${tc(c.name)}"></span> ${esc(c.name)}</b><span>${c.count} ${c.count === 1 ? 'entry' : 'entries'}, all time</span></div>
-        <div class="acts" style="margin:0"><button class="b sm line" data-ren="${c.id}">Rename</button><button class="b sm warn" data-delcat="${c.id}">Delete</button></div></div>`).join('')
+      ${S.categories.map(c => `<div class="srow"><div class="tx"><b><span class="dot" style="--tc:${tc(c.name)}"></span> ${esc(c.name)}</b><span>${c.count} ${c.count === 1 ? 'entry' : 'entries'}, all time${c.budget ? ` · budget ${money(c.budget)}/month` : ''}</span></div>
+        <div class="acts" style="margin:0"><button class="b sm line" data-bud="${c.id}">Budget</button><button class="b sm line" data-ren="${c.id}">Rename</button><button class="b sm warn" data-delcat="${c.id}">Delete</button></div></div>`).join('')
         || '<p class="muted small">No categories yet. Pick “New category” when adding, or type <b>#food</b>.</p>'}
     </div>
     ${S.me.admin ? peopleCard() : ''}
@@ -596,6 +664,11 @@ function settingsView() {
     const c = S.categories.find(x => x.id === +b.dataset.ren);
     const name = prompt('New name for this category', c.name);
     if (name && name.trim() !== c.name) busy(b, async () => { await api(`/api/category/${c.id}/rename`, { name }); await refresh(true); });
+  });
+  $$('[data-bud]').forEach(b => b.onclick = () => {
+    const c = S.categories.find(x => x.id === +b.dataset.bud);
+    const v = prompt(`Monthly budget for ${c.name} (leave empty to switch it off)`, c.budget ? c.budget / 100 : '');
+    if (v !== null) busy(b, async () => { await api(`/api/category/${c.id}/budget`, { budget: v.trim() || '0' }); toast('Saved'); await refresh(true); });
   });
   $$('[data-delcat]').forEach(b => b.onclick = () => busy(b, async () => {
     const c = S.categories.find(x => x.id === +b.dataset.delcat);
@@ -747,7 +820,7 @@ function openAdd(day) {
 }
 function openEdit(e) {
   F.entry = e;
-  openForm('Edit entry', `Added at ${fmtTime(e.time)}`, e.on_date, [e]);
+  openForm('Edit entry', `${e.bank ? 'From a bank alert · recorded' : 'Added'} at ${fmtTime(e.time)}`, e.on_date, [e]);
 }
 $('#fab').onclick = () => openAdd(defaultDay());
 $('#fCancel').onclick = () => $('#edit').close();
@@ -825,4 +898,8 @@ $('#fDelete').onclick = () => busy($('#fDelete'), async () => {
 });
 
 // ---- boot ----
-if (joinToken) startJoin(); else refresh(true);
+if (joinToken) startJoin();
+else {
+  history.replaceState(null, '', '/#entries');   // every fresh open starts on Entries, whatever tab it was left on
+  refresh(true);
+}

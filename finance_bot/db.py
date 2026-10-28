@@ -49,6 +49,15 @@ CREATE TABLE IF NOT EXISTS invite (
     used_by    INTEGER REFERENCES user(user_id),
     claim_user INTEGER REFERENCES user(user_id)
 );
+
+-- Bank alert emails that looked like money but matched no known format.
+CREATE TABLE IF NOT EXISTS bank_miss (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES user(user_id),
+    subject     TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
 """
 
 # Columns added after the first release. Listed here rather than in SCHEMA so
@@ -63,6 +72,11 @@ _LATER_COLUMNS = [
     ("user", "pw_hash", "TEXT"),                        # NULL for the admin (env PIN)
     ("user", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
     ("user", "disabled", "INTEGER NOT NULL DEFAULT 0"),
+    ("user", "bank_balance", "INTEGER"),                # paise, from the newest bank alert
+    ("user", "bank_balance_at", "TEXT"),
+    ("user", "bank_uid", "INTEGER"),                    # last IMAP UID read; NULL = never started
+    ("entry", "bank_ref", "TEXT"),                      # UPI ref / UTR when a bank alert filed it
+    ("category", "budget", "INTEGER NOT NULL DEFAULT 0"),   # paise/month, 0 = off
 ]
 
 _SETTINGS = {"tz", "currency", "budget"}
@@ -87,6 +101,9 @@ def init(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS user_name ON user(name COLLATE NOCASE)"
                  " WHERE name IS NOT NULL")
+    # one entry per bank transaction, however often its alert is read
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS entry_bank_ref ON entry(user_id, bank_ref)"
+                 " WHERE bank_ref IS NOT NULL")
     conn.commit()
 
 
@@ -128,6 +145,17 @@ def add_entry(conn, user_id: int, kind: str, amount: int, name: str,
         (user_id, kind, amount, name, category_id, _iso(on_date), _now()))
     conn.commit()
     return cur.lastrowid
+
+
+def add_bank_entry(conn, user_id: int, kind: str, amount: int, name: str,
+                   category_id: int | None, on_date, bank_ref: str) -> int | None:
+    """None when this transaction is already in the ledger."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO entry (user_id, kind, amount, name, category_id, on_date,"
+        " created_at, bank_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, kind, amount, name, category_id, _iso(on_date), _now(), bank_ref))
+    conn.commit()
+    return cur.lastrowid if cur.rowcount else None
 
 
 def get_entry(conn, user_id: int, entry_id: int):
@@ -229,6 +257,13 @@ def rename_category(conn, user_id: int, category_id: int, name: str) -> bool:
     return cur.rowcount > 0
 
 
+def set_category_budget(conn, user_id: int, category_id: int, budget: int) -> bool:
+    cur = conn.execute("UPDATE category SET budget = ? WHERE id = ? AND user_id = ?",
+                       (budget, category_id, user_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def delete_category(conn, user_id: int, category_id: int) -> bool:
     """Entries survive; they just become uncategorized."""
     cur = conn.execute("DELETE FROM category WHERE id = ? AND user_id = ?",
@@ -288,9 +323,74 @@ def month_totals(conn, user_id: int):
 def category_counts(conn, user_id: int):
     """Every category with how many entries it holds, all time."""
     return conn.execute(
-        "SELECT c.id, c.name, COUNT(e.id) AS count FROM category c"
+        "SELECT c.id, c.name, c.budget, COUNT(e.id) AS count FROM category c"
         " LEFT JOIN entry e ON e.category_id = c.id"
         " WHERE c.user_id = ? GROUP BY c.id ORDER BY c.name", (user_id,)).fetchall()
+
+
+def taxi_pool(conn, user_id: int, received: str, refund: str, split: str) -> dict:
+    """All time, by category: what came in, what was refunded, what went to the
+    partner. The partner's half is of what's left after refunds."""
+    got = {(r["name"].lower(), r["kind"]): r for r in conn.execute(
+        "SELECT c.name AS name, e.kind AS kind, COUNT(*) AS n, SUM(e.amount) AS total"
+        " FROM entry e JOIN category c ON c.id = e.category_id"
+        " WHERE e.user_id = ? AND c.name IN (?, ?, ?) GROUP BY c.id, e.kind",
+        (user_id, received, refund, split))}
+    pick = lambda name, kind: got.get((name.lower(), kind)) or {"n": 0, "total": 0}
+    r, f, s = pick(received, "earn"), pick(refund, "exp"), pick(split, "exp")
+    half = (r["total"] - f["total"]) // 2
+    return {"received": r["total"], "received_n": r["n"], "refunded": f["total"],
+            "refunded_n": f["n"], "sent": s["total"], "sent_n": s["n"],
+            "partner_half": half, "owed": half - s["total"]}
+
+
+def salary_status(conn, user_id: int, salary: str, exclude_like: str = "taxi bot%") -> dict | None:
+    """The latest salary and what has been spent since the day it landed.
+    Taxi bot money moves through the same account but isn't salary money."""
+    pay = conn.execute(
+        "SELECT e.on_date, SUM(e.amount) AS amount FROM entry e"
+        " JOIN category c ON c.id = e.category_id"
+        " WHERE e.user_id = ? AND e.kind = 'earn' AND c.name = ?"
+        " GROUP BY e.on_date ORDER BY e.on_date DESC LIMIT 1", (user_id, salary)).fetchone()
+    if pay is None:
+        return None
+    spent = conn.execute(
+        "SELECT COALESCE(SUM(e.amount), 0) FROM entry e LEFT JOIN category c ON c.id = e.category_id"
+        " WHERE e.user_id = ? AND e.kind = 'exp' AND e.on_date >= ?"
+        " AND (c.name IS NULL OR c.name NOT LIKE ?)",
+        (user_id, pay["on_date"], exclude_like)).fetchone()[0]
+    return {"on_date": pay["on_date"], "amount": pay["amount"], "spent": spent,
+            "left": pay["amount"] - spent}
+
+
+# --- bank sync --------------------------------------------------------------
+
+def set_bank_uid(conn, user_id: int, uid: int) -> None:
+    conn.execute("UPDATE user SET bank_uid = ? WHERE user_id = ?", (uid, user_id))
+    conn.commit()
+
+
+def set_bank_balance(conn, user_id: int, balance: int) -> None:
+    conn.execute("UPDATE user SET bank_balance = ?, bank_balance_at = ? WHERE user_id = ?",
+                 (balance, _now(), user_id))
+    conn.commit()
+
+
+def add_bank_miss(conn, user_id: int, subject: str, body: str) -> None:
+    conn.execute("INSERT INTO bank_miss (user_id, subject, body, created_at) VALUES (?, ?, ?, ?)",
+                 (user_id, subject, body, _now()))
+    conn.commit()
+
+
+def bank_misses(conn, user_id: int):
+    return conn.execute("SELECT * FROM bank_miss WHERE user_id = ? ORDER BY id",
+                        (user_id,)).fetchall()
+
+
+def drop_bank_miss(conn, user_id: int, miss_id: int) -> bool:
+    cur = conn.execute("DELETE FROM bank_miss WHERE id = ? AND user_id = ?", (miss_id, user_id))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def record_alert(conn, user_id: int, month: str, level: int) -> None:

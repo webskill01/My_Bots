@@ -1,10 +1,10 @@
-"""Entry point: python -m finance_bot"""
+"""Entry point: python -m finance_bot (the web panel, plus the bank sync thread)"""
 
 import logging
 import os
 import sys
 
-from . import bot, db
+from . import panel
 
 
 def load_env(path: str = ".env") -> None:
@@ -45,19 +45,7 @@ def main() -> None:
     setup_logging()
 
     load_env()
-    if sys.argv[1:] == ["panel"]:   # python -m finance_bot panel
-        from . import panel
-        panel.serve(os.environ.get("DB_PATH", "finance.db"))
-        return
-    token = os.environ.get("BOT_TOKEN")
-    if not token:
-        sys.exit("BOT_TOKEN is not set. Copy .env.example to .env and paste the "
-                 "token from @BotFather.")
-
-    conn = db.connect(os.environ.get("DB_PATH", "finance.db"))
-    db.init(conn)
-    logging.info("finance tracker starting")
-    bot.build(token, conn).run_polling()
+    panel.serve(os.environ.get("DB_PATH", "finance.db"))   # a trailing "panel" arg is still accepted
 
 
 if __name__ == "__main__":

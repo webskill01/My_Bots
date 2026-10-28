@@ -221,3 +221,42 @@ def test_recent_items_are_the_most_logged_with_their_latest_amount(pconn):
     recent = panel.recent_items(pconn, TG, today, "Asia/Kolkata")
     assert [(r["name"], r["amount"], r["category"], r["n"]) for r in recent] == [
         ("Chai", 2500, "Food", 3), ("uber", 9000, None, 1)]
+
+
+# --- bank sync, category budgets --------------------------------------------
+
+from finance_bot import bank
+
+
+def test_bank_entries_are_flagged_and_bank_state_is_the_admins_only(pconn, monkeypatch):
+    monkeypatch.setitem(bank.STATUS, "on", True)
+    t = {"kind": "earn", "amount": 90_00, "party": "SUNIL DUTT", "ref": "666700742595",
+         "balance": 29829_68, "on_date": dt.date(2026, 10, 28)}
+    bank.record(pconn, TG, t, "")
+    db.add_bank_miss(pconn, TG, "Debit card transaction", "Rs.500 debited")
+    s = panel.state(pconn, me(pconn), "2026-10")
+    assert [(e["name"], e["bank"], e["category"]) for e in s["entries"]] == [("SUNIL DUTT", True, bank.UNCLAIMED)]
+    assert s["bank"]["balance"] == 29829_68
+    assert [m["subject"] for m in s["bank"]["misses"]] == ["Debit card transaction"]
+    assert s["taxi"]["received_n"] == 1
+    assert panel.state(pconn, me(pconn, OLD), "2026-10")["bank"] is None
+    miss = s["bank"]["misses"][0]["id"]
+    panel.act(pconn, me(pconn), f"/api/bank/miss/{miss}/dismiss", {})
+    assert panel.state(pconn, me(pconn), "2026-10")["bank"]["misses"] == []
+
+
+def test_hand_entries_are_not_bank_entries(pconn):
+    _, out = panel.act(pconn, me(pconn), "/api/quick", {"text": "250 lunch 2/10/2026"})
+    assert out["entry"]["bank"] is False
+
+
+def test_category_budget_set_clear_and_scoped(pconn):
+    cid = db.create_category(pconn, TG, "food")
+    panel.act(pconn, me(pconn), f"/api/category/{cid}/budget", {"budget": "5000"})
+    cats = panel.state(pconn, me(pconn), "2026-10")["categories"]
+    assert [(c["name"], c["budget"]) for c in cats if c["name"] == "food"] == [("food", 5000_00)]
+    panel.act(pconn, me(pconn), f"/api/category/{cid}/budget", {"budget": ""})
+    assert [c["budget"] for c in db.category_counts(pconn, TG) if c["id"] == cid] == [0]
+    assert panel.act(pconn, me(pconn, OLD), f"/api/category/{cid}/budget", {"budget": "1"})[0] == 404
+    with pytest.raises(ValueError):
+        panel.act(pconn, me(pconn), f"/api/category/{cid}/budget", {"budget": "abc"})

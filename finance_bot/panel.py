@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo, available_timezones
 # Same login machinery as the schedule panel: one implementation to trust.
 from schedule_bot.panel import _JOIN, _NAME, _cookie, _token_hash, check_pw, hash_pw, valid_password
 
-from . import db, parse
+from . import bank, db, parse
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +98,8 @@ def entry_json(e, tz: str) -> dict:
         filed = filed.replace(tzinfo=dt.timezone.utc)
     return {"id": e["id"], "kind": e["kind"], "amount": e["amount"], "name": e["name"],
             "category": e["category_name"], "category_id": e["category_id"],
-            "on_date": e["on_date"], "time": filed.astimezone(ZoneInfo(tz)).strftime("%H:%M")}
+            "on_date": e["on_date"], "time": filed.astimezone(ZoneInfo(tz)).strftime("%H:%M"),
+            "bank": bool(e["bank_ref"])}
 
 
 def recent_items(conn, uid: int, today: dt.date, tz: str, limit: int = 10) -> list[dict]:
@@ -140,7 +141,20 @@ def state(conn, user, month: str | None) -> dict:
         "months": [dict(m) for m in db.month_totals(conn, uid)],
         "categories": [dict(c) for c in db.category_counts(conn, uid)],
         "recent": recent_items(conn, uid, today, user["tz"]),
+        "salary": db.salary_status(conn, uid, bank.SALARY),
+        "taxi": db.taxi_pool(conn, uid, bank.UNCLAIMED, bank.REFUND, bank.SPLIT),
+        "bank": bank_state(conn, user),
     }
+
+
+def bank_state(conn, user) -> dict | None:
+    """Only the ledger the bank sync writes to sees it."""
+    if user["user_id"] != CFG["admin_uid"] or not (bank.STATUS["on"] or user["bank_uid"] is not None):
+        return None
+    return {"balance": user["bank_balance"], "balance_at": user["bank_balance_at"],
+            "on": bank.STATUS["on"], "checked_at": bank.STATUS["checked_at"],
+            "error": bank.STATUS["error"],
+            "misses": [dict(m) for m in db.bank_misses(conn, user["user_id"])]}
 
 
 def admin_state(conn) -> dict:
@@ -380,9 +394,18 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
         db.update_entry(conn, uid, int(m[1]), **fields_from(conn, uid, b, today))
         return 200, {"entry": entry_json(db.get_entry(conn, uid, int(m[1])), user["tz"])}
 
-    if m := re.fullmatch(r"/api/category/(\d+)/(rename|delete)", path):
+    if m := re.fullmatch(r"/api/bank/miss/(\d+)/dismiss", path):
+        db.drop_bank_miss(conn, uid, int(m[1]))
+        return 200, {"ok": True}
+
+    if m := re.fullmatch(r"/api/category/(\d+)/(rename|delete|budget)", path):
         if m[2] == "delete":
             db.delete_category(conn, uid, int(m[1]))
+            return 200, {"ok": True}
+        if m[2] == "budget":
+            raw = str(b.get("budget") or "0").strip()
+            if not db.set_category_budget(conn, uid, int(m[1]), 0 if raw == "0" else _amount(raw)):
+                return 404, {"error": "That category is gone"}
             return 200, {"ok": True}
         name = " ".join(str(b.get("name", "")).lstrip("#").split())[:32]
         if not name or not db.rename_category(conn, uid, int(m[1]), name):
@@ -480,6 +503,7 @@ def serve(db_path: str) -> None:
     uid = os.environ.get("FINANCE_USER_ID")
     setup(conn, int(uid) if uid else None)
     conn.close()
+    bank.start(db_path, CFG["admin_uid"])
 
     port = int(os.environ.get("FINANCE_PORT", 8098))
     log.info("finance panel on http://127.0.0.1:%s, admin is user %s", port, CFG["admin_uid"])
