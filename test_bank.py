@@ -82,7 +82,7 @@ def test_html_mail_is_read_as_text():
     (alert("earn", 90_00), bank.UNCLAIMED),                       # a taxi bot payment
     (alert("earn", 928_37), None),
     (alert("earn", 12000_00, "EASECAB MOBI"), bank.SALARY),       # salary
-    (alert("earn", 90_00, "EASECAB MOBILITY P"), bank.SALARY),
+    (alert("earn", 1218_00, "EASECAB MOBI"), None),                # a refund, not salary
     (alert("exp", 45_00, PARTNER), bank.SPLIT),                    # partner's half
     (alert("exp", 180_00, PARTNER), bank.REFUND),                  # paying back his refunds
     (alert("exp", 90_00, "9914623976@P"), bank.REFUND),
@@ -217,16 +217,6 @@ def test_salary_counts_only_spending_since_it_landed(conn):
     add(conn, "exp", 999_00, "food", "2026-10-28", uid=OTHER)
     s = db.salary_status(conn, ME, "salary")
     assert s == {"on_date": "2026-10-26", "amount": 60000_00, "spent": 750_00, "left": 59250_00}
-
-
-def test_a_smaller_employer_credit_adds_to_salary_instead_of_restarting(conn):
-    add(conn, "earn", 12000_00, "Salary", "2026-10-26")
-    add(conn, "exp", 300_00, "food", "2026-10-30")
-    add(conn, "earn", 1218_00, "Salary", "2026-11-05")             # an expense refund, say
-    s = db.salary_status(conn, ME, "salary")
-    assert s == {"on_date": "2026-10-26", "amount": 13218_00, "spent": 300_00, "left": 12918_00}
-    add(conn, "earn", 12000_00, "Salary", "2026-11-26")            # next month starts fresh
-    assert db.salary_status(conn, ME, "salary")["on_date"] == "2026-11-26"
 
 
 def test_no_salary_yet(conn):

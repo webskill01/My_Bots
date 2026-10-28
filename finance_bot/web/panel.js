@@ -559,6 +559,13 @@ function overviewView() {
 }
 
 // ---- Categories ----
+function wireBudgets() {
+  $$('[data-bud]').forEach(b => b.onclick = () => {
+    const c = S.categories.find(x => x.id === +b.dataset.bud);
+    const v = prompt(`Monthly budget for ${c.name} (leave empty to switch it off)`, c.budget ? c.budget / 100 : '');
+    if (v !== null) busy(b, async () => { await api(`/api/category/${c.id}/budget`, { budget: v.trim() || '0' }); toast('Saved'); await refresh(true); });
+  });
+}
 function categoriesView() {
   const m = S.month;
   const spent = byCategory('exp'), earned = byCategory('earn');
@@ -578,7 +585,10 @@ function categoriesView() {
         <span class="mv">${r.s.total || !r.e.total ? money(r.s.total) : ''}${r.e.total ? `<span class="pos">${r.s.total ? ' · ' : ''}${money(r.e.total, true)}</span>` : ''}<small>${r.s.count + r.e.count} ${r.s.count + r.e.count === 1 ? 'entry' : 'entries'}</small></span></a>`).join('')
       || `<p class="muted small">Nothing recorded in ${esc(monthName(m))}.</p>`}</div>
     ${idle.length ? `<p class="muted small" style="margin:12px 2px 6px">Not used this month</p><div class="chips wrap">${idle.map(c => `<span class="chip" style="cursor:default"><span class="dot" style="--tc:${tc(c.name)}"></span>${esc(c.name)}</span>`).join('')}</div>` : ''}
-    <p class="hint" style="margin-top:10px">Rename, delete or set a monthly budget for a category in Settings.</p>`;
+    <div class="card"><h2>Monthly budgets</h2>${S.categories.map(c => `<div class="srow"><div class="tx"><b><span class="dot" style="--tc:${tc(c.name)}"></span> ${esc(c.name)}</b><span>${c.budget ? `${money(c.budget)} a month` : 'no budget'}</span></div>
+      <div class="acts" style="margin:0"><button class="b sm line" data-bud="${c.id}">${c.budget ? 'Change' : 'Set budget'}</button></div></div>`).join('') || '<p class="muted small">No categories yet.</p>'}</div>
+    <p class="hint" style="margin-top:10px">Rename or delete a category in Settings.</p>`;
+  wireBudgets();
 }
 
 // ---- Months: every month side by side ----
@@ -665,11 +675,7 @@ function settingsView() {
     const name = prompt('New name for this category', c.name);
     if (name && name.trim() !== c.name) busy(b, async () => { await api(`/api/category/${c.id}/rename`, { name }); await refresh(true); });
   });
-  $$('[data-bud]').forEach(b => b.onclick = () => {
-    const c = S.categories.find(x => x.id === +b.dataset.bud);
-    const v = prompt(`Monthly budget for ${c.name} (leave empty to switch it off)`, c.budget ? c.budget / 100 : '');
-    if (v !== null) busy(b, async () => { await api(`/api/category/${c.id}/budget`, { budget: v.trim() || '0' }); toast('Saved'); await refresh(true); });
-  });
+  wireBudgets();
   $$('[data-delcat]').forEach(b => b.onclick = () => busy(b, async () => {
     const c = S.categories.find(x => x.id === +b.dataset.delcat);
     if (!await ask(`Delete “${c.name}”?`, 'Its entries are kept: they just become uncategorized.', 'Delete', true)) return;

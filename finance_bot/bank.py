@@ -38,6 +38,7 @@ SPLIT = "Taxi bot split"              # the partner's share, sent to them
 REFUND = "Taxi bot refund"            # ₹90 back to a user, or repaying the partner who refunded
 SALARY = "Salary"
 EMPLOYER = "EASECAB"                  # salary lands as "EASECAB MOBI..."
+SALARY_MIN = 5000_00                  # ponytail: smaller employer credits (refunds) aren't salary
 
 STATUS = {"on": False, "checked_at": None, "error": None}   # read by the panel
 
@@ -74,7 +75,7 @@ def category_for(t: dict, partner: str) -> str | None:
     """The owner's rules. A best guess: anything wrong gets fixed at night."""
     if t["kind"] == "earn":
         if t["party"].upper().startswith(EMPLOYER):
-            return SALARY
+            return SALARY if t["amount"] >= SALARY_MIN else None
         return UNCLAIMED if t["amount"] == TAXI else None
     if partner and t["party"].lower() == partner.lower():
         # whole ₹90s repay refunds he made for us; anything else is his share
