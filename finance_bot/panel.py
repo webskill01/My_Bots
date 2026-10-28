@@ -144,7 +144,14 @@ def state(conn, user, month: str | None) -> dict:
         "salary": db.salary_status(conn, uid, bank.SALARY),
         "taxi": db.taxi_pool(conn, uid, bank.UNCLAIMED, bank.REFUND, bank.SPLIT),
         "bank": bank_state(conn, user),
+        "cycle": cycle_state(conn, uid, today),
     }
+
+
+def cycle_state(conn, uid: int, today) -> dict:
+    start, end = db.pay_cycle(today, bank.PAYDAY)
+    return {"start": start.isoformat(), "end": end.isoformat(),
+            "spent": db.spent_by_category(conn, uid, start, end)}
 
 
 def bank_state(conn, user) -> dict | None:

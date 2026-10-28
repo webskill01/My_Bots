@@ -334,12 +334,13 @@ function taxiCard() {
     ${line(t.owed < 0 ? 'Overpaid' : 'Still owed', '', money(Math.abs(t.owed)), t.owed > 0 ? 'neg' : '')}
     <p class="hint">All time. ${month} ${month === 1 ? 'payment' : 'payments'} in ${esc(monthName(S.month))}. ₹90 in is filed as “Taxi bot unclaimed”, ₹90 out (or whole ₹90s to your partner) as “Taxi bot refund”, other amounts to your partner as “Taxi bot split”.</p></div>`;
 }
-// categories with their own monthly budget, against this month's spending
-function budgetsCard(spentBy) {
+// categories with their own budget, against spending this pay cycle (26th to 25th)
+function budgetsCard() {
   const list = S.categories.filter(c => c.budget);
   if (!list.length) return '';
-  return `<div class="card"><h2>Category budgets</h2>${list.map(c => {
-    const s = (spentBy.find(x => x.id === c.id) || { total: 0 }).total;
+  const d = x => esc(fmtDate(x, { day: 'numeric', month: 'short' }));
+  return `<div class="card"><h2>Category budgets · ${d(S.cycle.start)} – ${d(S.cycle.end)}</h2>${list.map(c => {
+    const s = S.cycle.spent[c.id] || 0;
     return `<a class="mrow" href="#entries/${S.month}/${c.id}">
       <span class="ml"><span class="dot" style="--tc:${tc(c.name)}"></span>${esc(c.name)}</span>
       <div class="meter" style="--tc:${meterColor(s, c.budget)}"><i style="--v:${pct(s, c.budget)}"></i></div>
@@ -541,7 +542,7 @@ function overviewView() {
       <div class="tile"><div class="l">Per day</div><div class="v">${money(Math.round(t.spent / Math.max(1, upto) / 100) * 100)}</div><div class="s">${perDay[busiest] ? `biggest: ${esc(fmtDate(`${m}-${String(busiest + 1).padStart(2, '0')}`, { day: 'numeric', month: 'short' }))}` : 'average spend'}</div></div>
     </div>
     ${budget}
-    ${budgetsCard(spentBy)}
+    ${budgetsCard()}
     ${cur ? salaryCard() : ''}
     ${taxiCard()}
     ${S.entries.length ? `
@@ -578,14 +579,14 @@ function categoriesView() {
   const idle = S.categories.filter(c => !used.has(c.id));
   $('#view').innerHTML = `
     ${head('categories', 'Categories', esc(monthName(m)))}
-    ${budgetsCard(spent)}
+    ${budgetsCard()}
     <div class="card">${rows.map(r => `<a class="mrow" href="#entries/${m}/${r.id}">
         <span class="ml"><span class="dot" style="--tc:${r.id ? tc(r.name) : '#9a9a92'}"></span>${r.id ? esc(r.name) : '<i>Uncategorized</i>'}</span>
         <div class="meter" style="--tc:${r.id ? tc(r.name) : '#9a9a92'}"><i style="--v:${pct(r.s.total, peak)}"></i></div>
         <span class="mv">${r.s.total || !r.e.total ? money(r.s.total) : ''}${r.e.total ? `<span class="pos">${r.s.total ? ' · ' : ''}${money(r.e.total, true)}</span>` : ''}<small>${r.s.count + r.e.count} ${r.s.count + r.e.count === 1 ? 'entry' : 'entries'}</small></span></a>`).join('')
       || `<p class="muted small">Nothing recorded in ${esc(monthName(m))}.</p>`}</div>
     ${idle.length ? `<p class="muted small" style="margin:12px 2px 6px">Not used this month</p><div class="chips wrap">${idle.map(c => `<span class="chip" style="cursor:default"><span class="dot" style="--tc:${tc(c.name)}"></span>${esc(c.name)}</span>`).join('')}</div>` : ''}
-    <div class="card"><h2>Monthly budgets</h2>${S.categories.map(c => `<div class="srow"><div class="tx"><b><span class="dot" style="--tc:${tc(c.name)}"></span> ${esc(c.name)}</b><span>${c.budget ? `${money(c.budget)} a month` : 'no budget'}</span></div>
+    <div class="card"><h2>Monthly budgets</h2>${S.categories.map(c => `<div class="srow"><div class="tx"><b><span class="dot" style="--tc:${tc(c.name)}"></span> ${esc(c.name)}</b><span>${c.budget ? `${money(c.budget)} from the 26th to the 25th` : 'no budget'}</span></div>
       <div class="acts" style="margin:0"><button class="b sm line" data-bud="${c.id}">${c.budget ? 'Change' : 'Set budget'}</button></div></div>`).join('') || '<p class="muted small">No categories yet.</p>'}</div>
     <p class="hint" style="margin-top:10px">Rename or delete a category in Settings.</p>`;
   wireBudgets();

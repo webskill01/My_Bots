@@ -363,6 +363,21 @@ def salary_status(conn, user_id: int, salary: str, exclude_like: str = "taxi bot
             "left": pay["amount"] - spent}
 
 
+def pay_cycle(today: dt.date, payday: int) -> tuple[dt.date, dt.date]:
+    """The budget period holding today: the payday to the day before the next one."""
+    start = today.replace(day=payday) if today.day >= payday else         (today.replace(day=1) - dt.timedelta(days=1)).replace(day=payday)
+    nxt = (start + dt.timedelta(days=31)).replace(day=payday)
+    return start, nxt - dt.timedelta(days=1)
+
+
+def spent_by_category(conn, user_id: int, start: dt.date, end: dt.date) -> dict[int, int]:
+    """Spending per category id over start..end, both included."""
+    return dict(conn.execute(
+        "SELECT category_id, SUM(amount) FROM entry WHERE user_id = ? AND kind = 'exp'"
+        " AND category_id IS NOT NULL AND on_date BETWEEN ? AND ? GROUP BY category_id",
+        (user_id, start.isoformat(), end.isoformat())).fetchall())
+
+
 # --- bank sync --------------------------------------------------------------
 
 def set_bank_uid(conn, user_id: int, uid: int) -> None:

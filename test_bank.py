@@ -228,3 +228,24 @@ def test_category_budget_is_per_owner(conn):
     assert db.set_category_budget(conn, OTHER, cid, 5000_00) is False
     assert db.set_category_budget(conn, ME, cid, 5000_00) is True
     assert [c["budget"] for c in db.category_counts(conn, ME)] == [5000_00]
+
+
+@pytest.mark.parametrize("today, start, end", [
+    ("2026-10-28", "2026-10-26", "2026-11-25"),
+    ("2026-10-26", "2026-10-26", "2026-11-25"),
+    ("2026-10-25", "2026-09-26", "2026-10-25"),
+    ("2027-01-05", "2026-12-26", "2027-01-25"),                    # across the year
+    ("2027-03-01", "2027-02-26", "2027-03-25"),                    # short February
+])
+def test_pay_cycle_runs_26th_to_25th(today, start, end):
+    assert db.pay_cycle(dt.date.fromisoformat(today), 26) ==         (dt.date.fromisoformat(start), dt.date.fromisoformat(end))
+
+
+def test_spent_by_category_counts_only_the_cycle(conn):
+    add(conn, "exp", 100_00, "food", "2026-10-25")                 # last cycle
+    add(conn, "exp", 200_00, "food", "2026-10-26")
+    add(conn, "exp", 300_00, "food", "2026-11-25")
+    add(conn, "earn", 999_00, "food", "2026-10-27")                # earnings don't use a budget
+    add(conn, "exp", 999_00, "food", "2026-10-27", uid=OTHER)
+    cid = db.get_or_create_category(conn, ME, "food")
+    assert db.spent_by_category(conn, ME, dt.date(2026, 10, 26), dt.date(2026, 11, 25)) == {cid: 500_00}

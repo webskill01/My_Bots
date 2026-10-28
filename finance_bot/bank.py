@@ -37,6 +37,7 @@ UNCLAIMED = "Taxi bot unclaimed"      # ₹90 in from a user
 SPLIT = "Taxi bot split"              # the partner's share, sent to them
 REFUND = "Taxi bot refund"            # ₹90 back to a user, or repaying the partner who refunded
 SALARY = "Salary"
+PAYDAY = 26                           # budgets run from the 26th to the 25th
 EMPLOYER = "EASECAB"                  # salary lands as "EASECAB MOBI..."
 SALARY_MIN = 5000_00                  # ponytail: smaller employer credits (refunds) aren't salary
 
