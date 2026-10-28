@@ -347,12 +347,16 @@ def taxi_pool(conn, user_id: int, received: str, refund: str, split: str) -> dic
 def salary_status(conn, user_id: int, salary: str, exclude_like: str = "taxi bot%") -> dict | None:
     """The latest salary and what has been spent since the day it landed.
     Taxi bot money moves through the same account but isn't salary money."""
+    # ponytail: payday = the latest day with at least half the biggest pay; smaller
+    # credits from the employer after it (an expense refund) add to it, not restart it
     pay = conn.execute(
-        "SELECT e.on_date, SUM(e.amount) AS amount FROM entry e"
+        "WITH s AS (SELECT e.on_date, SUM(e.amount) AS amount FROM entry e"
         " JOIN category c ON c.id = e.category_id"
-        " WHERE e.user_id = ? AND e.kind = 'earn' AND c.name = ?"
-        " GROUP BY e.on_date ORDER BY e.on_date DESC LIMIT 1", (user_id, salary)).fetchone()
-    if pay is None:
+        " WHERE e.user_id = ? AND e.kind = 'earn' AND c.name = ? GROUP BY e.on_date)"
+        " SELECT MAX(on_date) AS on_date, (SELECT SUM(amount) FROM s WHERE on_date >= ("
+        "   SELECT MAX(on_date) FROM s WHERE amount * 2 >= (SELECT MAX(amount) FROM s))) AS amount"
+        " FROM s WHERE amount * 2 >= (SELECT MAX(amount) FROM s)", (user_id, salary)).fetchone()
+    if pay["on_date"] is None:
         return None
     spent = conn.execute(
         "SELECT COALESCE(SUM(e.amount), 0) FROM entry e LEFT JOIN category c ON c.id = e.category_id"

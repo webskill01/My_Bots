@@ -37,6 +37,7 @@ UNCLAIMED = "Taxi bot unclaimed"      # ₹90 in from a user
 SPLIT = "Taxi bot split"              # the partner's share, sent to them
 REFUND = "Taxi bot refund"            # ₹90 back to a user, or repaying the partner who refunded
 SALARY = "Salary"
+EMPLOYER = "EASECAB"                  # salary lands as "EASECAB MOBI..."
 
 STATUS = {"on": False, "checked_at": None, "error": None}   # read by the panel
 
@@ -72,6 +73,8 @@ def parse_alert(text: str) -> dict | None:
 def category_for(t: dict, partner: str) -> str | None:
     """The owner's rules. A best guess: anything wrong gets fixed at night."""
     if t["kind"] == "earn":
+        if t["party"].upper().startswith(EMPLOYER):
+            return SALARY
         return UNCLAIMED if t["amount"] == TAXI else None
     if partner and t["party"].lower() == partner.lower():
         # whole ₹90s repay refunds he made for us; anything else is his share
