@@ -262,6 +262,8 @@ def test_taxi_log_stays_out_of_the_month_and_legit_moves_it_in(pconn, monkeypatc
     assert code == 200 and (out["entry"]["name"], out["entry"]["category"]) == ("SUNIL DUTT", None)
     s = panel.state(pconn, me(pconn), "2026-10")
     assert [e["amount"] for e in s["entries"]] == [90_00] and len(s["taxi_log"]) == 1
+    assert panel.act(pconn, me(pconn), "/api/taxi/settle", {}) == (200, {"ok": True})
+    assert panel.state(pconn, me(pconn), "2026-10")["taxi"]["sent_n"] == 0
 
 
 def test_hand_entries_are_not_bank_entries(pconn):

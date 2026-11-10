@@ -44,17 +44,19 @@ as an entry (tagged "bank"). It also keeps the balance from the latest alert.
   "Couldn't read a bank email". Add it by hand, then dismiss.
 
 Taxi bot money never enters the ledger: no category, no totals, no budgets.
-It goes to a separate log on the Overview's Taxi bot card:
+It goes to a separate log. On Entries, pick **Without taxi** (default),
+**Taxi & partner** or **All**:
 
 | Alert | Logged as |
 |---|---|
-| ₹90 or ₹45 in | in |
+| ₹90, ₹99, ₹100 or ₹45 in | in |
 | ₹90 or ₹45 out, or whole ₹90s to the partner | refund |
 | any other amount to the partner | to partner |
 
-The card shows payments received, refunded, the partner's 50% of what's left,
-what was sent, and what's still owed. A real expense or earning that happened
-to be ₹90/₹45: tap **Legit** to move it into Entries and categorize it.
+The taxi views show payments received, refunded, the partner's 50% of what's
+left, what was sent, and what's still owed, counted since the last
+**Settled up today**. A real expense or earning that only looked like taxi
+money: tap it to move it into Entries and categorize it.
 
 ## Salary and budgets
 

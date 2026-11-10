@@ -34,8 +34,8 @@ RETRY = 120          # after an error, before reconnecting
 
 TAXI = 90_00                          # every taxi bot payment is ₹90
 TAXI_AMOUNTS = {90_00, 45_00}         # a payment, or the partner's half of one
+TAXI_IN = TAXI_AMOUNTS | {99_00, 100_00}   # users sometimes round up
 SALARY = "Salary"
-PAYDAY = 26                           # budgets run from the 26th to the 25th
 EMPLOYER = "EASECAB"                  # salary lands as "EASECAB MOBI..."
 SALARY_MIN = 5000_00                  # ponytail: smaller employer credits (refunds) aren't salary
 
@@ -84,7 +84,7 @@ def taxi_rule(t: dict, partner: str) -> str | None:
     """Taxi bot money goes to its own log, never the ledger: 'in', 'refund'
     or 'split'. A false catch is moved over by hand ("legit")."""
     if t["kind"] == "earn":
-        return "in" if t["amount"] in TAXI_AMOUNTS and not is_employer(t) else None
+        return "in" if t["amount"] in TAXI_IN and not is_employer(t) else None
     if partner and t["party"].lower() == partner.lower():
         # whole ₹90s repay refunds he made for us; anything else is his share
         return "refund" if t["amount"] % TAXI == 0 else "split"

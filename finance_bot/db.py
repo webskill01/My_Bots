@@ -92,6 +92,7 @@ _LATER_COLUMNS = [
     ("user", "bank_uid", "INTEGER"),                    # last IMAP UID read; NULL = never started
     ("entry", "bank_ref", "TEXT"),                      # UPI ref / UTR when a bank alert filed it
     ("category", "budget", "INTEGER NOT NULL DEFAULT 0"),   # paise/month, 0 = off
+    ("user", "taxi_settled_at", "TEXT"),                # UTC; the taxi pool counts from here
 ]
 
 _SETTINGS = {"tz", "currency", "budget"}
@@ -369,16 +370,24 @@ def category_counts(conn, user_id: int):
 
 
 def taxi_pool(conn, user_id: int) -> dict:
-    """All time: what came in, what was refunded, what went to the partner.
-    The partner's half is of what's left after refunds."""
+    """Since the last settle-up: what came in, what was refunded, what went to
+    the partner. The partner's half is of what's left after refunds."""
+    since = conn.execute("SELECT taxi_settled_at FROM user WHERE user_id = ?",
+                         (user_id,)).fetchone()[0]
     got = {r["rule"]: r for r in conn.execute(
         "SELECT rule, COUNT(*) AS n, SUM(amount) AS total FROM taxi WHERE user_id = ?"
-        " GROUP BY rule", (user_id,))}
+        " AND created_at > ? GROUP BY rule", (user_id, since or ""))}
     r, f, s = ({"n": 0, "total": 0} | dict(got.get(k) or {}) for k in ("in", "refund", "split"))
     half = (r["total"] - f["total"]) // 2
     return {"received": r["total"], "received_n": r["n"], "refunded": f["total"],
             "refunded_n": f["n"], "sent": s["total"], "sent_n": s["n"],
-            "partner_half": half, "owed": half - s["total"]}
+            "partner_half": half, "owed": half - s["total"], "settled_at": since}
+
+
+def settle_taxi(conn, user_id: int) -> None:
+    """Everything logged so far is divided: the pool starts again from now."""
+    conn.execute("UPDATE user SET taxi_settled_at = ? WHERE user_id = ?", (_now(), user_id))
+    conn.commit()
 
 
 def taxi_log(conn, user_id: int, start, end):
@@ -432,21 +441,6 @@ def salary_status(conn, user_id: int, salary: str) -> dict | None:
         (user_id, pay["on_date"])).fetchone()[0]
     return {"on_date": pay["on_date"], "amount": pay["amount"], "spent": spent,
             "left": pay["amount"] - spent}
-
-
-def pay_cycle(today: dt.date, payday: int) -> tuple[dt.date, dt.date]:
-    """The budget period holding today: the payday to the day before the next one."""
-    start = today.replace(day=payday) if today.day >= payday else         (today.replace(day=1) - dt.timedelta(days=1)).replace(day=payday)
-    nxt = (start + dt.timedelta(days=31)).replace(day=payday)
-    return start, nxt - dt.timedelta(days=1)
-
-
-def spent_by_category(conn, user_id: int, start: dt.date, end: dt.date) -> dict[int, int]:
-    """Spending per category id over start..end, both included."""
-    return dict(conn.execute(
-        "SELECT category_id, SUM(amount) FROM entry WHERE user_id = ? AND kind = 'exp'"
-        " AND category_id IS NOT NULL AND on_date BETWEEN ? AND ? GROUP BY category_id",
-        (user_id, start.isoformat(), end.isoformat())).fetchall())
 
 
 # --- bank sync --------------------------------------------------------------

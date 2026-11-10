@@ -52,6 +52,7 @@ const MONTHLY = ['entries', 'overview', 'categories'];
 
 let S = null;              // /api/state for one month
 let kindFilter = 'all';
+let taxiFilter = 'without';   // 'without' | 'taxi' | 'all': which side of the taxi line Entries shows
 let query = '';
 
 // ---- helpers ----
@@ -100,12 +101,16 @@ function byCategory(kind, list = S.entries) {
 }
 const spentOn = d => S.entries.filter(e => e.kind === 'exp' && e.on_date === d).reduce((a, e) => a + e.amount, 0);
 const catTag = e => (e.category ? `<span class="tag" style="--tc:${tc(e.category)}">${esc(e.category)}</span>` : '');
+const TAXI_TC = '#a8660b';
+const taxiTag = e => (e.taxi ? `<span class="tag" style="--tc:${TAXI_TC}">${e.taxi === 'split' ? 'partner' : 'taxi'}</span>` : '');
+// a taxi log row shaped like an entry, so the same list can show both
+const taxiRow = x => ({ ...x, name: x.party, taxi: x.rule });
 const byTime = (a, b) => a.time.localeCompare(b.time) || a.id - b.id;
 
 // an entry row; `timed` puts the time it was added in its own column
 function row(e, timed) {
-  const meta = [catTag(e), timed ? '' : `<span>${fmtTime(e.time)}</span>`].filter(Boolean).join('');
-  return `<div class="row ${e.kind} ${timed ? 'timed' : ''}" data-open="${e.id}" tabindex="0" style="--tc:${e.category ? tc(e.category) : 'var(--line)'}">
+  const meta = [catTag(e), taxiTag(e), timed ? '' : `<span>${fmtTime(e.time)}</span>`].filter(Boolean).join('');
+  return `<div class="row ${e.kind} ${timed ? 'timed' : ''}" ${e.taxi ? 'data-taxi' : 'data-open'}="${e.id}" tabindex="0" style="--tc:${e.taxi ? TAXI_TC : e.category ? tc(e.category) : 'var(--line)'}">
     ${timed ? `<div class="tm">${fmtTime(e.time).replace(' ', '<small>')}</small></div>` : ''}
     <div style="min-width:0"><div class="t1">${esc(e.name) || '<span class="muted">—</span>'}</div>${meta ? `<div class="t2">${meta}</div>` : ''}</div>
     <div class="amt">${money(e.amount, e.kind === 'earn')}</div></div>`;
@@ -113,6 +118,18 @@ function row(e, timed) {
 function wireRows() {
   $$('[data-open]').forEach(r => {
     r.onclick = () => openEdit(S.entries.find(e => e.id === +r.dataset.open));
+    r.onkeydown = ev => { if (ev.key === 'Enter') r.click(); };
+  });
+  // taxi money isn't edited; one that was a real expense or earning moves to the ledger
+  $$('[data-taxi]').forEach(r => {
+    r.onclick = async () => {
+      if (!await ask('Not taxi money?', 'Move this to your entries as a real expense or earning. You pick its category next.', 'Move to entries')) return;
+      busy(null, async () => {
+        const { entry } = await api(`/api/taxi/${r.dataset.taxi}/legit`, {});
+        await refresh(true);
+        openEdit(entry);
+      });
+    };
     r.onkeydown = ev => { if (ev.key === 'Enter') r.click(); };
   });
 }
@@ -303,12 +320,12 @@ function wireBankNotice() {
 
 // ---- money right now: bank balance, salary left, what the partner is owed ----
 const meterColor = (used, cap) => (used > cap ? 'var(--bad)' : used * 100 >= cap * 80 ? 'var(--deep)' : 'var(--ok)');
-const hasTaxi = () => S.taxi.received_n || S.taxi.sent_n || S.taxi.refunded_n || S.taxi_log.length;
+const hasTaxi = () => S.taxi.received_n || S.taxi.sent_n || S.taxi.refunded_n;
 function nowTiles() {
   const tiles = [];
   if (S.bank && S.bank.balance != null) tiles.push(`<div class="tile"><div class="l">In the bank</div><div class="v">${money(S.bank.balance)}</div><div class="s">from the latest alert</div></div>`);
   if (S.salary) tiles.push(`<div class="tile"><div class="l">Salary left</div><div class="v ${S.salary.left < 0 ? 'neg' : 'pos'}">${money(S.salary.left)}</div><div class="s">${money(S.salary.spent)} spent since ${esc(fmtDate(S.salary.on_date, { day: 'numeric', month: 'short' }))}</div></div>`);
-  if (hasTaxi()) tiles.push(`<div class="tile"><div class="l">${S.taxi.owed < 0 ? 'Partner overpaid' : 'Owed to partner'}</div><div class="v">${money(Math.abs(S.taxi.owed))}</div><div class="s">taxi bot, all time</div></div>`);
+  if (hasTaxi()) tiles.push(`<div class="tile"><div class="l">${S.taxi.owed < 0 ? 'Partner overpaid' : 'Owed to partner'}</div><div class="v">${money(Math.abs(S.taxi.owed))}</div><div class="s">taxi bot, ${S.taxi.settled_at ? 'since ' + esc(settledOn()) : 'all time'}</div></div>`);
   return tiles.length ? `<div class="tiles">${tiles.join('')}</div>` : '';
 }
 function salaryCard() {
@@ -319,40 +336,35 @@ function salaryCard() {
     <div class="meter" style="--tc:${meterColor(s.spent, s.amount)}"><i style="--v:${pct(s.spent, s.amount)}"></i></div>
     <p class="hint">${pct(s.spent, s.amount)}% used since it landed · taxi bot money isn’t counted</p></div>`;
 }
-// Taxi bot money lives in its own log: never in totals, categories or budgets.
-const TAXI_RULE = { in: 'in', refund: 'refund', split: 'to partner' };
-function taxiCard() {
-  if (!hasTaxi()) return '';
+// Taxi bot money: never in totals, categories or budgets. Entries shows it on
+// demand (the Taxi filter), with what's owed since the last settle-up.
+const settledOn = () => (S.taxi.settled_at ? fmtDate(S.taxi.settled_at.slice(0, 10), { day: 'numeric', month: 'short' }) : '');
+function taxiSummary() {
   const t = S.taxi;
   const line = (l, n, v, cls = '') => `<div class="mrow"><span class="ml">${l}</span><span class="muted small">${n}</span><span class="mv ${cls}">${v}</span></div>`;
-  const log = S.taxi_log.map(x => `<div class="mrow">
-      <span class="ml">${esc(x.party) || '—'}</span>
-      <span class="muted small">${esc(fmtDate(x.on_date, { day: 'numeric', month: 'short' }))} · ${TAXI_RULE[x.rule]}</span>
-      <span class="mv ${x.kind === 'earn' ? 'pos' : ''}">${money(x.amount, x.kind === 'earn')}
-        <button class="b sm line" data-legit="${x.id}" type="button" title="A real expense or earning: move it to the ledger">Legit</button></span></div>`).join('');
-  return `<div class="card"><h2>Taxi bot</h2>
+  return `<div class="card"><h2>Taxi bot · ${t.settled_at ? 'since settled ' + esc(settledOn()) : 'all time'}</h2>
     ${line('Received', `${t.received_n} payments`, money(t.received, true), 'pos')}
     ${line('Refunded', `${t.refunded_n}×`, money(t.refunded))}
     ${line('Partner’s half', 'of what’s left', money(t.partner_half))}
     ${line('Sent to partner', `${t.sent_n}×`, money(t.sent))}
     ${line(t.owed < 0 ? 'Overpaid' : 'Still owed', '', money(Math.abs(t.owed)), t.owed > 0 ? 'neg' : '')}
-    ${log ? `<h2 style="margin-top:16px">${esc(monthName(S.month))} · ${S.taxi_log.length}</h2>${log}` : ''}
-    <p class="hint">Kept apart from your spending and earnings. ₹90 and ₹45 bank payments, and transfers to your partner, land here. One that was a real expense or earning? Tap Legit to move it to Entries and give it a category.</p></div>`;
+    <div class="acts"><button class="b sm line" id="settle" type="button">Settled up today</button></div>
+    <p class="hint">Not counted in your spending or earnings. ₹90, ₹99, ₹100 or ₹45 in, ₹90 or ₹45 out, and transfers to your partner land here. Tap one that was a real expense or earning to move it to your entries.</p></div>`;
 }
 function wireTaxi() {
-  $$('[data-legit]').forEach(btn => btn.onclick = () => busy(btn, async () => {
-    const { entry } = await api(`/api/taxi/${btn.dataset.legit}/legit`, {});
-    await refresh(true);
-    openEdit(entry);
-  }));
+  const b = $('#settle');
+  if (b) b.onclick = async () => {
+    if (!await ask('Settled up?', 'Start the taxi totals again from now. The transactions stay listed.', 'Settled')) return;
+    busy(b, async () => { await api('/api/taxi/settle', {}); await refresh(true); toast('Taxi totals start again from now'); });
+  };
 }
-// categories with their own budget, against spending this pay cycle (26th to 25th)
+// categories with their own budget, against this calendar month's spending
 function budgetsCard() {
   const list = S.categories.filter(c => c.budget);
   if (!list.length) return '';
-  const d = x => esc(fmtDate(x, { day: 'numeric', month: 'short' }));
-  return `<div class="card"><h2>Category budgets · ${d(S.cycle.start)} – ${d(S.cycle.end)}</h2>${list.map(c => {
-    const s = S.cycle.spent[c.id] || 0;
+  const spent = Object.fromEntries(byCategory('exp').map(c => [c.id, c.total]));
+  return `<div class="card"><h2>Category budgets · ${esc(monthName(S.month))}</h2>${list.map(c => {
+    const s = spent[c.id] || 0;
     return `<a class="mrow" href="#entries/${S.month}/${c.id}">
       <span class="ml"><span class="dot" style="--tc:${tc(c.name)}"></span>${esc(c.name)}</span>
       <div class="meter" style="--tc:${meterColor(s, c.budget)}"><i style="--v:${pct(s, c.budget)}"></i></div>
@@ -436,9 +448,10 @@ function entriesView(_, cat) {
   const catId = cat === undefined || cat === '' ? null : +cat;
   const catName = catId === null ? '' : catId ? (S.categories.find(c => c.id === catId) || {}).name || 'Category' : 'Uncategorized';
   const q = query.trim().toLowerCase();
-  const filtered = kindFilter !== 'all' || catId !== null || q;
-  const list = S.entries.filter(e => (kindFilter === 'all' || e.kind === kindFilter)
-    && (catId === null || (e.category_id || 0) === catId)
+  const filtered = kindFilter !== 'all' || catId !== null || q || taxiFilter === 'taxi';
+  const rows = [...(taxiFilter === 'taxi' ? [] : S.entries), ...(taxiFilter === 'without' ? [] : S.taxi_log.map(taxiRow))];
+  const list = rows.filter(e => (kindFilter === 'all' || e.kind === kindFilter)
+    && (catId === null || (!e.taxi && (e.category_id || 0) === catId))
     && (!q || (e.name || '').toLowerCase().includes(q) || (e.category || '').toLowerCase().includes(q)));
   const t = totals(list);
   const groups = {};
@@ -447,7 +460,11 @@ function entriesView(_, cat) {
     ${quickAddHtml()}
     ${bankNotice()}
     ${catId === null ? monthCard(m) : head('entries', catName, `${esc(monthName(m))} · ${list.length} ${list.length === 1 ? 'entry' : 'entries'} · spent ${money(t.spent)}${t.earned ? ` · earned ${money(t.earned, true)}` : ''}`)}
-    <div class="chips" role="group" aria-label="Filter" style="margin-top:14px">
+    <div class="chips" role="group" aria-label="Taxi bot money" style="margin-top:14px">
+      ${[['without', 'Without taxi'], ['taxi', 'Taxi & partner'], ['all', 'All']].map(([k, l]) => `<button class="chip" data-taxi-f="${k}" aria-pressed="${taxiFilter === k}">${l}</button>`).join('')}
+    </div>
+    ${taxiFilter === 'without' ? '' : taxiSummary()}
+    <div class="chips" role="group" aria-label="Filter" style="margin-top:8px">
       ${[['all', 'All'], ['exp', 'Spent'], ['earn', 'Earned']].map(([k, l]) => `<button class="chip" data-kind-f="${k}" aria-pressed="${kindFilter === k}">${l}</button>`).join('')}
       ${catId !== null ? `<a class="chip" aria-pressed="true" href="#entries/${m}">${esc(catName)} ✕</a>` : ''}
     </div>
@@ -458,6 +475,8 @@ function entriesView(_, cat) {
       <div class="list">${groups[d].sort((a, b) => byTime(b, a)).map(e => row(e)).join('')}</div>`; }).join('')
       || `<div class="empty">${filtered ? 'Nothing matches.' : `Nothing recorded in ${esc(monthName(m))}. Type above, or tap a day in the calendar.`}</div>`}`;
   $$('[data-kind-f]').forEach(b => b.onclick = () => { kindFilter = b.dataset.kindF; render(); });
+  $$('[data-taxi-f]').forEach(b => b.onclick = () => { taxiFilter = b.dataset.taxiF; render(); });
+  wireTaxi();
   $('#q').oninput = e => {
     query = e.target.value; render();
     const el = $('#q'); el.focus(); el.setSelectionRange(el.value.length, el.value.length);
@@ -556,7 +575,6 @@ function overviewView() {
     ${budget}
     ${budgetsCard()}
     ${cur ? salaryCard() : ''}
-    ${taxiCard()}
     ${S.entries.length ? `
     <div class="card"><h2>Spending by day</h2>
       <div class="bars">${perDay.map((v, i) => { const d = `${m}-${String(i + 1).padStart(2, '0')}`; return `<a class="barcol ${d === S.today ? 'today' : ''} ${d > S.today ? 'future' : ''}" style="--i:${i}" href="#day/${d}" title="${esc(fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' }))}: ${money(v)}">
@@ -569,7 +587,6 @@ function overviewView() {
         ${top.length ? `<div class="card"><h2>Top spends</h2>${top.map(x => `<div class="mrow"><span class="ml">${esc(x.name)}</span><span class="muted small">${x.count}×</span><span class="mv">${money(x.total)}</span></div>`).join('')}</div>` : ''}
       </div>
     </div>` : `<div class="empty">Nothing recorded in ${esc(monthName(m))}. Add entries from the Entries tab.</div>`}`;
-  wireTaxi();
 }
 
 // ---- Categories ----

@@ -90,6 +90,9 @@ def test_category_rules(t, category):
 @pytest.mark.parametrize("t, rule", [
     (alert("earn", 90_00), "in"),                                  # a taxi bot payment
     (alert("earn", 45_00), "in"),
+    (alert("earn", 99_00), "in"),                                  # users round up
+    (alert("earn", 100_00), "in"),
+    (alert("exp", 100_00, "RAKHPREET S"), None),                   # only incoming rounds up
     (alert("earn", 90_00, "EASECAB MOBI"), None),                  # employer money is never taxi
     (alert("earn", 928_37), None),
     (alert("exp", 45_00, PARTNER), "split"),                       # partner's half
@@ -261,7 +264,19 @@ def test_taxi_pool(conn):
     db.add_taxi(conn, OTHER, "earn", 90_00, "U", "in", "2026-10-28", "x")
     p = db.taxi_pool(conn, ME)
     assert p == {"received": 900_00, "received_n": 10, "refunded": 90_00, "refunded_n": 1,
-                 "sent": 200_00, "sent_n": 1, "partner_half": 405_00, "owed": 205_00}
+                 "sent": 200_00, "sent_n": 1, "partner_half": 405_00, "owed": 205_00, "settled_at": None}
+
+
+def test_settling_starts_the_pool_again(conn):
+    db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-10-28", "a")
+    conn.execute("UPDATE taxi SET created_at = '2026-11-01T00:00:00+00:00'")
+    db.settle_taxi(conn, ME)
+    conn.execute("UPDATE user SET taxi_settled_at = '2026-11-05T00:00:00+00:00' WHERE user_id = ?", (ME,))
+    db.add_taxi(conn, ME, "earn", 100_00, "U", "in", "2026-11-10", "b")
+    p = db.taxi_pool(conn, ME)
+    assert (p["received"], p["received_n"]) == (100_00, 1) and p["settled_at"]
+    assert len(db.taxi_log(conn, ME, *ALL)) == 2                    # the log keeps both
+    assert db.taxi_pool(conn, OTHER)["settled_at"] is None
 
 
 def test_salary_counts_only_spending_since_it_landed(conn):
@@ -284,24 +299,3 @@ def test_category_budget_is_per_owner(conn):
     assert db.set_category_budget(conn, OTHER, cid, 5000_00) is False
     assert db.set_category_budget(conn, ME, cid, 5000_00) is True
     assert [c["budget"] for c in db.category_counts(conn, ME)] == [5000_00]
-
-
-@pytest.mark.parametrize("today, start, end", [
-    ("2026-10-28", "2026-10-26", "2026-11-25"),
-    ("2026-10-26", "2026-10-26", "2026-11-25"),
-    ("2026-10-25", "2026-09-26", "2026-10-25"),
-    ("2027-01-05", "2026-12-26", "2027-01-25"),                    # across the year
-    ("2027-03-01", "2027-02-26", "2027-03-25"),                    # short February
-])
-def test_pay_cycle_runs_26th_to_25th(today, start, end):
-    assert db.pay_cycle(dt.date.fromisoformat(today), 26) ==         (dt.date.fromisoformat(start), dt.date.fromisoformat(end))
-
-
-def test_spent_by_category_counts_only_the_cycle(conn):
-    add(conn, "exp", 100_00, "food", "2026-10-25")                 # last cycle
-    add(conn, "exp", 200_00, "food", "2026-10-26")
-    add(conn, "exp", 300_00, "food", "2026-11-25")
-    add(conn, "earn", 999_00, "food", "2026-10-27")                # earnings don't use a budget
-    add(conn, "exp", 999_00, "food", "2026-10-27", uid=OTHER)
-    cid = db.get_or_create_category(conn, ME, "food")
-    assert db.spent_by_category(conn, ME, dt.date(2026, 10, 26), dt.date(2026, 11, 25)) == {cid: 500_00}

@@ -97,14 +97,18 @@ def who(party: str) -> str:
     return CFG["partner_name"] if p and CFG["partner_name"] and party.lower() == p.lower() else party
 
 
-def entry_json(e, tz: str) -> dict:
-    """`time` is when it was filed, on the user's clock: "14:05"."""
-    filed = dt.datetime.fromisoformat(e["created_at"])
+def clock(created_at: str, tz: str) -> str:
+    """When it was filed, on the user's clock: "14:05"."""
+    filed = dt.datetime.fromisoformat(created_at)
     if filed.tzinfo is None:   # legacy naive stamps are UTC
         filed = filed.replace(tzinfo=dt.timezone.utc)
+    return filed.astimezone(ZoneInfo(tz)).strftime("%H:%M")
+
+
+def entry_json(e, tz: str) -> dict:
     return {"id": e["id"], "kind": e["kind"], "amount": e["amount"], "name": who(e["name"]),
             "category": e["category_name"], "category_id": e["category_id"],
-            "on_date": e["on_date"], "time": filed.astimezone(ZoneInfo(tz)).strftime("%H:%M"),
+            "on_date": e["on_date"], "time": clock(e["created_at"], tz),
             "bank": bool(e["bank_ref"])}
 
 
@@ -150,17 +154,10 @@ def state(conn, user, month: str | None) -> dict:
         "salary": db.salary_status(conn, uid, bank.SALARY),
         "taxi": db.taxi_pool(conn, uid),
         "taxi_log": [{"id": t["id"], "kind": t["kind"], "amount": t["amount"], "party": who(t["party"]),
-                      "rule": t["rule"], "on_date": t["on_date"]}
+                      "rule": t["rule"], "on_date": t["on_date"], "time": clock(t["created_at"], user["tz"])}
                      for t in db.taxi_log(conn, uid, start, end)],
         "bank": bank_state(conn, user),
-        "cycle": cycle_state(conn, uid, today),
     }
-
-
-def cycle_state(conn, uid: int, today) -> dict:
-    start, end = db.pay_cycle(today, bank.PAYDAY)
-    return {"start": start.isoformat(), "end": end.isoformat(),
-            "spent": db.spent_by_category(conn, uid, start, end)}
 
 
 def bank_state(conn, user) -> dict | None:
@@ -409,6 +406,10 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
             return 200, {"ok": True}
         db.update_entry(conn, uid, int(m[1]), **fields_from(conn, uid, b, today))
         return 200, {"entry": entry_json(db.get_entry(conn, uid, int(m[1])), user["tz"])}
+
+    if path == "/api/taxi/settle":   # divided with the partner: count again from now
+        db.settle_taxi(conn, uid)
+        return 200, {"ok": True}
 
     if m := re.fullmatch(r"/api/taxi/(\d+)/legit", path):   # not taxi money after all
         eid = db.taxi_to_ledger(conn, uid, int(m[1]))
