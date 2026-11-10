@@ -147,8 +147,9 @@ def state(conn, user, month: str | None) -> dict:
         "budget": user["budget"],
         "me": {"name": user["name"], "admin": bool(user["is_admin"]),
                "has_password": bool(user["pw_hash"])},
-        "entries": [entry_json(e, user["tz"]) for e in db.list_entries(conn, uid, start, end)],
-        "months": [dict(m) for m in db.month_totals(conn, uid)],
+        "entries": [entry_json(e, user["tz"]) for e in db.list_entries(conn, uid, start, end)]
+                   + taxi_net_entries(conn, uid, start, end, user["tz"]),
+        "months": db.month_totals(conn, uid),
         "categories": [dict(c) for c in db.category_counts(conn, uid)],
         "recent": recent_items(conn, uid, today, user["tz"]),
         "salary": db.salary_status(conn, uid, bank.SALARY),
@@ -158,6 +159,17 @@ def state(conn, user, month: str | None) -> dict:
                      for t in db.taxi_log(conn, uid, start, end)],
         "bank": bank_state(conn, user),
     }
+
+
+def taxi_net_entries(conn, uid: int, start, end, tz: str) -> list[dict]:
+    """One read-only earning per day with taxi money, shaped like an entry so
+    totals, the calendar and the category views count it like any other.
+    Negative ids: never a real entry's."""
+    cat = db.find_category(conn, uid, bank.TAXI_CAT)
+    return [{"id": -i, "kind": "earn", "amount": d["net"], "name": f"Taxi bot · net of {d['n']}",
+             "category": cat["name"] if cat else bank.TAXI_CAT, "category_id": cat["id"] if cat else None,
+             "on_date": d["on_date"], "time": clock(d["created_at"], tz), "bank": True, "net": True}
+            for i, d in enumerate(db.taxi_daily_net(conn, uid, start, end), 1) if d["net"]]
 
 
 def bank_state(conn, user) -> dict | None:

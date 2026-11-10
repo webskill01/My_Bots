@@ -350,15 +350,21 @@ def category_totals(conn, user_id: int, start, end, kind: str = "exp"):
         (user_id, kind, _iso(start), _iso(end))).fetchall()
 
 
-def month_totals(conn, user_id: int):
-    """Spent / earned per calendar month, newest first: the month-by-month view."""
-    return conn.execute(
+def month_totals(conn, user_id: int) -> list[dict]:
+    """Spent / earned per calendar month, newest first: the month-by-month view.
+    Earned includes each month's taxi net (in, less refunds and partner splits)."""
+    months = {r["month"]: dict(r) for r in conn.execute(
         "SELECT substr(on_date, 1, 7) AS month,"
         "       COALESCE(SUM(CASE WHEN kind = 'exp'  THEN amount END), 0) AS spent,"
         "       COALESCE(SUM(CASE WHEN kind = 'earn' THEN amount END), 0) AS earned,"
         "       COUNT(*) AS count"
-        " FROM entry WHERE user_id = ? GROUP BY month ORDER BY month DESC",
-        (user_id,)).fetchall()
+        " FROM entry WHERE user_id = ? GROUP BY month", (user_id,))}
+    for month, net in conn.execute(
+            "SELECT substr(on_date, 1, 7), SUM(CASE WHEN kind = 'earn' THEN amount ELSE -amount END)"
+            " FROM taxi WHERE user_id = ? GROUP BY 1", (user_id,)):
+        m = months.setdefault(month, {"month": month, "spent": 0, "earned": 0, "count": 0})
+        m["earned"] += net
+    return sorted(months.values(), key=lambda m: m["month"], reverse=True)
 
 
 def category_counts(conn, user_id: int):
@@ -388,6 +394,16 @@ def settle_taxi(conn, user_id: int) -> None:
     """Everything logged so far is divided: the pool starts again from now."""
     conn.execute("UPDATE user SET taxi_settled_at = ? WHERE user_id = ?", (_now(), user_id))
     conn.commit()
+
+
+def taxi_daily_net(conn, user_id: int, start, end):
+    """Per day: taxi money in, less refunds and what went to the partner.
+    This is what the taxi bot actually earned you; it can be negative."""
+    return conn.execute(
+        "SELECT on_date, SUM(CASE WHEN kind = 'earn' THEN amount ELSE -amount END) AS net,"
+        " COUNT(*) AS n, MAX(created_at) AS created_at FROM taxi"
+        " WHERE user_id = ? AND on_date BETWEEN ? AND ? GROUP BY on_date ORDER BY on_date",
+        (user_id, _iso(start), _iso(end))).fetchall()
 
 
 def taxi_log(conn, user_id: int, start, end):

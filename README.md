@@ -43,8 +43,10 @@ as an entry (tagged "bank"). It also keeps the balance from the latest alert.
 - An alert it can't read (e.g. a card swipe) shows on Entries as
   "Couldn't read a bank email". Add it by hand, then dismiss.
 
-Taxi bot money never enters the ledger: no category, no totals, no budgets.
-It goes to a separate log. On Entries, pick **Without taxi** (default),
+Taxi bot transactions go to a separate log, never the ledger one by one.
+Each day's net (in, less refunds and what went to the partner) counts as one
+earning, "Taxi bot · net", under the `taxi` category; anything else tagged
+`taxi` by hand adds to it. No budgets touch it. On Entries, pick **Without taxi** (default),
 **Taxi & partner** or **All**:
 
 | Alert | Logged as |

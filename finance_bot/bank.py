@@ -35,6 +35,7 @@ RETRY = 120          # after an error, before reconnecting
 TAXI = 90_00                          # every taxi bot payment is ₹90
 TAXI_AMOUNTS = {90_00, 45_00}         # a payment, or the partner's half of one
 SALARY = "Salary"
+TAXI_CAT = "taxi"                     # the taxi bot's net earnings, plus anything tagged by hand
 EMPLOYER = "EASECAB"                  # salary lands as "EASECAB MOBI..."
 SALARY_MIN = 5000_00                  # ponytail: smaller employer credits (refunds) aren't salary
 
@@ -172,7 +173,8 @@ def start(db_path: str, user_id: int) -> bool:
         log.info("bank sync off: set GMAIL_USER and GMAIL_APP_PASSWORD to turn it on")
         return False
     conn = db.connect(db_path)
-    db.get_or_create_category(conn, user_id, SALARY)     # ready to pick before the first alert
+    for name in (SALARY, TAXI_CAT):                     # ready to pick before the first alert
+        db.get_or_create_category(conn, user_id, name)
     conn.close()
     STATUS["on"] = True
     threading.Thread(target=_run, args=(db_path, user_id, (user, password),
