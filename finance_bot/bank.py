@@ -7,7 +7,8 @@ Every entry it files can be corrected in the panel like any other.
 
 Env: GMAIL_USER, GMAIL_APP_PASSWORD (Google account -> Security -> App
 passwords), BANK_PARTNER (the partner's UPI handle exactly as the debit alerts
-show it, e.g. 99xxxxxxxx@p), BANK_PARTNER_NAME (shown instead of that handle).
+show it, e.g. 99xxxxxxxx@p), BANK_PARTNER_NAME (shown instead of that handle;
+credits from him show this name).
 """
 
 import datetime as dt
@@ -82,8 +83,11 @@ def category_for(t: dict) -> str | None:
 
 def taxi_rule(t: dict, partner: str) -> str | None:
     """Taxi bot money goes to its own log, never the ledger: 'in', 'refund'
-    or 'split'. A false catch is moved over by hand ("legit")."""
-    to_partner = partner and t["party"].lower() == partner.lower()
+    or 'split'. A false catch is moved over by hand ("legit"). `partner` is
+    his UPI handle and name, comma-separated: debits show the handle, credits
+    his (cut-off) name."""
+    names = [p.strip().lower() for p in partner.split(",") if p.strip()]
+    to_partner = any(t["party"].lower().startswith(n) for n in names)
     if t["kind"] == "earn":   # money back from the partner nets off what he was sent
         return "split" if to_partner else "in" if t["amount"] in TAXI_AMOUNTS and not is_employer(t) else None
     if to_partner:
@@ -179,7 +183,7 @@ def start(db_path: str, user_id: int) -> bool:
     conn.close()
     STATUS["on"] = True
     threading.Thread(target=_run, args=(db_path, user_id, (user, password),
-                                        os.environ.get("BANK_PARTNER", "")),
+                                        ",".join(os.environ.get(k, "") for k in ("BANK_PARTNER", "BANK_PARTNER_NAME"))),
                      daemon=True, name="bank").start()
     log.info("bank sync on for %s, ledger %s", user, user_id)
     return True

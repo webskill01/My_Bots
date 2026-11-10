@@ -111,6 +111,12 @@ def test_without_a_partner_set_only_the_90_and_45_rules_apply():
     assert bank.taxi_rule(alert("exp", 45_00, PARTNER), "") == "refund"
 
 
+def test_credits_from_the_partner_match_his_name():
+    assert bank.taxi_rule(alert("earn", 45_00, "TANISHQ KUMA"), f"{PARTNER},Tanishq") == "split"
+    assert bank.taxi_rule(alert("exp", 135_00, PARTNER), f"{PARTNER},Tanishq") == "split"
+    assert bank.taxi_rule(alert("earn", 45_00, "TANISHQ KUMA"), PARTNER) == "in"
+
+
 # --- recording --------------------------------------------------------------
 
 ALL = ("2000-01-01", "2100-01-01")
