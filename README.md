@@ -43,21 +43,19 @@ as an entry (tagged "bank"). It also keeps the balance from the latest alert.
 - An alert it can't read (e.g. a card swipe) shows on Entries as
   "Couldn't read a bank email". Add it by hand, then dismiss.
 
-Taxi bot transactions go to a separate log, never the ledger one by one.
-Each day's net (in, less refunds and what went to the partner) counts as one
-earning, "Taxi bot · net", under the `taxi` category; anything else tagged
-`taxi` by hand adds to it. No budgets touch it. On Entries, pick **Without taxi** (default),
+Taxi bot payments don't enter the ledger one by one. They go to a separate log. On Entries, pick **Without taxi** (default),
 **Taxi & partner** or **All**:
 
 | Alert | Logged as |
 |---|---|
 | ₹90 or ₹45 in | in |
 | ₹90 or ₹45 out, or whole ₹90s to the partner | refund |
-| any other amount to the partner | to partner |
+| any other amount to the partner, or anything from him | to partner |
 
 The taxi views show payments received, refunded, the partner's 50% of what's
-left, what was sent, and what's still owed, counted since the last
-**Settled up today**. A real expense or earning that only looked like taxi
+left, what was sent, what's still owed, and what's left with you, counted since
+the last **Settled up today**. Settling adds what's left with you as one
+earning under the **taxi** category, then starts the totals again. A real expense or earning that only looked like taxi
 money: tap it to move it into Entries and categorize it.
 
 ## Salary and budgets

@@ -350,21 +350,15 @@ def category_totals(conn, user_id: int, start, end, kind: str = "exp"):
         (user_id, kind, _iso(start), _iso(end))).fetchall()
 
 
-def month_totals(conn, user_id: int) -> list[dict]:
-    """Spent / earned per calendar month, newest first: the month-by-month view.
-    Earned includes each month's taxi net (in, less refunds and partner splits)."""
-    months = {r["month"]: dict(r) for r in conn.execute(
+def month_totals(conn, user_id: int):
+    """Spent / earned per calendar month, newest first: the month-by-month view."""
+    return conn.execute(
         "SELECT substr(on_date, 1, 7) AS month,"
         "       COALESCE(SUM(CASE WHEN kind = 'exp'  THEN amount END), 0) AS spent,"
         "       COALESCE(SUM(CASE WHEN kind = 'earn' THEN amount END), 0) AS earned,"
         "       COUNT(*) AS count"
-        " FROM entry WHERE user_id = ? GROUP BY month", (user_id,))}
-    for month, net in conn.execute(
-            "SELECT substr(on_date, 1, 7), SUM(CASE WHEN kind = 'earn' THEN amount ELSE -amount END)"
-            " FROM taxi WHERE user_id = ? GROUP BY 1", (user_id,)):
-        m = months.setdefault(month, {"month": month, "spent": 0, "earned": 0, "count": 0})
-        m["earned"] += net
-    return sorted(months.values(), key=lambda m: m["month"], reverse=True)
+        " FROM entry WHERE user_id = ? GROUP BY month ORDER BY month DESC",
+        (user_id,)).fetchall()
 
 
 def category_counts(conn, user_id: int):
@@ -377,33 +371,41 @@ def category_counts(conn, user_id: int):
 
 def taxi_pool(conn, user_id: int) -> dict:
     """Since the last settle-up: what came in, what was refunded, what went to
-    the partner. The partner's half is of what's left after refunds."""
+    the partner (less anything he sent back). The partner's half is of what's
+    left after refunds; `mine` is the cash the taxi bot left with you."""
     since = conn.execute("SELECT taxi_settled_at FROM user WHERE user_id = ?",
                          (user_id,)).fetchone()[0]
     got = {r["rule"]: r for r in conn.execute(
-        "SELECT rule, COUNT(*) AS n, SUM(amount) AS total FROM taxi WHERE user_id = ?"
-        " AND created_at > ? GROUP BY rule", (user_id, since or ""))}
+        "SELECT rule, COUNT(*) AS n, SUM(CASE WHEN kind = 'exp' THEN amount ELSE -amount END) AS total"
+        " FROM taxi WHERE user_id = ? AND created_at > ? GROUP BY rule", (user_id, since or ""))}
     r, f, s = ({"n": 0, "total": 0} | dict(got.get(k) or {}) for k in ("in", "refund", "split"))
-    half = (r["total"] - f["total"]) // 2
-    return {"received": r["total"], "received_n": r["n"], "refunded": f["total"],
+    received = -r["total"]   # 'in' rows are all earnings
+    half = (received - f["total"]) // 2
+    return {"received": received, "received_n": r["n"], "refunded": f["total"],
             "refunded_n": f["n"], "sent": s["total"], "sent_n": s["n"],
-            "partner_half": half, "owed": half - s["total"], "settled_at": since}
+            "partner_half": half, "owed": half - s["total"],
+            "mine": received - f["total"] - s["total"], "settled_at": since}
 
 
-def settle_taxi(conn, user_id: int) -> None:
-    """Everything logged so far is divided: the pool starts again from now."""
-    conn.execute("UPDATE user SET taxi_settled_at = ? WHERE user_id = ?", (_now(), user_id))
-    conn.commit()
-
-
-def taxi_daily_net(conn, user_id: int, start, end):
-    """Per day: taxi money in, less refunds and what went to the partner.
-    This is what the taxi bot actually earned you; it can be negative."""
-    return conn.execute(
-        "SELECT on_date, SUM(CASE WHEN kind = 'earn' THEN amount ELSE -amount END) AS net,"
-        " COUNT(*) AS n, MAX(created_at) AS created_at FROM taxi"
-        " WHERE user_id = ? AND on_date BETWEEN ? AND ? GROUP BY on_date ORDER BY on_date",
-        (user_id, _iso(start), _iso(end))).fetchall()
+def settle_taxi(conn, user_id: int, on_date, name: str, category_id: int | None) -> int | None:
+    """Squared up with the partner: what the taxi bot left with you since the
+    last settle-up becomes one ledger entry, and the pool starts again. The
+    entry's id, or None when there was nothing to add."""
+    conn.execute("BEGIN IMMEDIATE")   # no bank alert slips in between the sum and the mark
+    try:
+        mine, eid = taxi_pool(conn, user_id)["mine"], None
+        if mine:
+            eid = conn.execute(
+                "INSERT INTO entry (user_id, kind, amount, name, category_id, on_date, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, "earn" if mine > 0 else "exp", abs(mine), name, category_id,
+                 _iso(on_date), _now())).lastrowid
+        conn.execute("UPDATE user SET taxi_settled_at = ? WHERE user_id = ?", (_now(), user_id))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return eid
 
 
 def taxi_log(conn, user_id: int, start, end):

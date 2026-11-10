@@ -93,6 +93,7 @@ def test_category_rules(t, category):
     (alert("earn", 100_00), None),                                 # rare, usually real money
     (alert("earn", 90_00, "EASECAB MOBI"), None),                  # employer money is never taxi
     (alert("earn", 928_37), None),
+    (alert("earn", 90_00, PARTNER), "split"),                      # partner paying back
     (alert("exp", 45_00, PARTNER), "split"),                       # partner's half
     (alert("exp", 135_00, PARTNER), "split"),
     (alert("exp", 180_00, PARTNER), "refund"),                     # paying back his refunds
@@ -259,31 +260,22 @@ def test_taxi_pool(conn):
         db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-10-28", f"in{i}")
     db.add_taxi(conn, ME, "exp", 90_00, "U", "refund", "2026-10-28", "f")       # one refunded
     db.add_taxi(conn, ME, "exp", 200_00, PARTNER, "split", "2026-10-28", "s")   # sent to partner
+    db.add_taxi(conn, ME, "earn", 50_00, PARTNER, "split", "2026-10-28", "b")   # partner sent some back
     db.add_taxi(conn, OTHER, "earn", 90_00, "U", "in", "2026-10-28", "x")
     p = db.taxi_pool(conn, ME)
     assert p == {"received": 900_00, "received_n": 10, "refunded": 90_00, "refunded_n": 1,
-                 "sent": 200_00, "sent_n": 1, "partner_half": 405_00, "owed": 205_00, "settled_at": None}
-
-
-def test_taxi_net_per_day_and_in_month_totals(conn):
-    db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-11-01", "a")
-    db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-11-01", "b")
-    db.add_taxi(conn, ME, "exp", 90_00, "U", "refund", "2026-11-01", "c")
-    db.add_taxi(conn, ME, "exp", 200_00, PARTNER, "split", "2026-11-02", "d")
-    db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-12-01", "e")        # a month with no entries
-    db.add_taxi(conn, OTHER, "earn", 90_00, "U", "in", "2026-11-01", "x")
-    add(conn, "earn", 1000_00, "sofi", "2026-11-03")
-    add(conn, "exp", 300_00, "food", "2026-11-03")
-    assert [(d["on_date"], d["net"], d["n"]) for d in db.taxi_daily_net(conn, ME, "2026-11-01", "2026-11-30")] ==         [("2026-11-01", 90_00, 3), ("2026-11-02", -200_00, 1)]
-    assert db.month_totals(conn, ME) == [
-        {"month": "2026-12", "spent": 0, "earned": 90_00, "count": 0},
-        {"month": "2026-11", "spent": 300_00, "earned": 1000_00 - 110_00, "count": 2}]
+                 "sent": 150_00, "sent_n": 2, "partner_half": 405_00, "owed": 255_00,
+                 "mine": 660_00, "settled_at": None}
 
 
 def test_settling_starts_the_pool_again(conn):
     db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-10-28", "a")
     conn.execute("UPDATE taxi SET created_at = '2026-11-01T00:00:00+00:00'")
-    db.settle_taxi(conn, ME)
+    conn.commit()
+    eid = db.settle_taxi(conn, ME, dt.date(2026, 11, 1), "Taxi settled", None)
+    e = db.get_entry(conn, ME, eid)
+    assert (e["kind"], e["amount"], e["name"], e["on_date"]) == ("earn", 90_00, "Taxi settled", "2026-11-01")
+    assert db.settle_taxi(conn, ME, dt.date(2026, 11, 1), "Taxi settled", None) is None   # nothing left
     conn.execute("UPDATE user SET taxi_settled_at = '2026-11-05T00:00:00+00:00' WHERE user_id = ?", (ME,))
     db.add_taxi(conn, ME, "earn", 100_00, "U", "in", "2026-11-10", "b")
     p = db.taxi_pool(conn, ME)

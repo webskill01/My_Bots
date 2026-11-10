@@ -244,7 +244,7 @@ def test_bank_entries_are_flagged_and_bank_state_is_the_admins_only(pconn, monke
     assert panel.state(pconn, me(pconn), "2026-10")["bank"]["misses"] == []
 
 
-def test_taxi_counts_as_one_net_earning_a_day_and_legit_moves_it_in(pconn, monkeypatch):
+def test_taxi_log_stays_out_of_the_month_and_legit_moves_it_in(pconn, monkeypatch):
     monkeypatch.setitem(panel.CFG, "partner", "9914623976@p")
     monkeypatch.setitem(panel.CFG, "partner_name", "Tanishq")
     pay = {"kind": "earn", "amount": 90_00, "party": "SUNIL DUTT", "ref": "r1",
@@ -252,11 +252,8 @@ def test_taxi_counts_as_one_net_earning_a_day_and_legit_moves_it_in(pconn, monke
     bank.record(pconn, TG, pay, "9914623976@p")
     bank.record(pconn, TG, dict(pay, kind="exp", amount=45_00, party="9914623976@p", ref="r2"),
                 "9914623976@p")
-    cid = db.create_category(pconn, TG, "taxi")
     s = panel.state(pconn, me(pconn), "2026-10")
-    # ₹90 in, ₹45 to the partner: ₹45 earned, under "taxi", and nothing spent
-    assert [(e["kind"], e["amount"], e["category_id"], e["net"]) for e in s["entries"]] ==         [("earn", 45_00, cid, True)]
-    assert s["months"] == [{"month": "2026-10", "spent": 0, "earned": 45_00, "count": 0}]
+    assert s["entries"] == [] and s["months"] == []
     assert [(x["party"], x["rule"]) for x in s["taxi_log"]] == [("Tanishq", "split"), ("SUNIL DUTT", "in")]
     assert (s["taxi"]["received_n"], s["taxi"]["sent_n"]) == (1, 1)
     tid = s["taxi_log"][1]["id"]
@@ -264,10 +261,10 @@ def test_taxi_counts_as_one_net_earning_a_day_and_legit_moves_it_in(pconn, monke
     code, out = panel.act(pconn, me(pconn), f"/api/taxi/{tid}/legit", {})
     assert code == 200 and (out["entry"]["name"], out["entry"]["category"]) == ("SUNIL DUTT", None)
     s = panel.state(pconn, me(pconn), "2026-10")
-    # the ₹90 is a normal entry now; the day's taxi net is just the −₹45 split
-    assert sorted((e["amount"], bool(e.get("net"))) for e in s["entries"]) == [(-45_00, True), (90_00, False)]
-    assert s["months"][0]["earned"] == 45_00 and len(s["taxi_log"]) == 1
-    assert panel.act(pconn, me(pconn), "/api/taxi/settle", {}) == (200, {"ok": True})
+    assert [e["amount"] for e in s["entries"]] == [90_00] and len(s["taxi_log"]) == 1
+    code, out = panel.act(pconn, me(pconn), "/api/taxi/settle", {})   # only ₹45 went to the partner
+    assert code == 200 and (out["entry"]["kind"], out["entry"]["amount"], out["entry"]["category"],
+                            out["entry"]["name"]) == ("exp", 45_00, "taxi", "Taxi bot · settled with Tanishq")
     assert panel.state(pconn, me(pconn), "2026-10")["taxi"]["sent_n"] == 0
 
 
