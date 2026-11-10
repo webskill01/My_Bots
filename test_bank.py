@@ -79,40 +79,65 @@ def test_html_mail_is_read_as_text():
 # --- your rules -------------------------------------------------------------
 
 @pytest.mark.parametrize("t, category", [
-    (alert("earn", 90_00), bank.UNCLAIMED),                       # a taxi bot payment
-    (alert("earn", 928_37), None),
     (alert("earn", 12000_00, "EASECAB MOBI"), bank.SALARY),       # salary
     (alert("earn", 1218_00, "EASECAB MOBI"), None),                # a refund, not salary
-    (alert("exp", 45_00, PARTNER), bank.SPLIT),                    # partner's half
-    (alert("exp", 180_00, PARTNER), bank.REFUND),                  # paying back his refunds
-    (alert("exp", 90_00, "9914623976@P"), bank.REFUND),
-    (alert("exp", 90_00, "RAKHPREET S"), bank.REFUND),             # refunding a user myself
-    (alert("exp", 220_00, "BAJWA FILLIN"), None),
+    (alert("earn", 928_37), None),
 ])
 def test_category_rules(t, category):
-    assert bank.category_for(t, PARTNER) == category
+    assert bank.category_for(t) == category
 
 
-def test_without_a_partner_set_only_the_90_rules_apply():
-    assert bank.category_for(alert("exp", 45_00, PARTNER), "") is None
-    assert bank.category_for(alert("exp", 90_00, PARTNER), "") == bank.REFUND
+@pytest.mark.parametrize("t, rule", [
+    (alert("earn", 90_00), "in"),                                  # a taxi bot payment
+    (alert("earn", 45_00), "in"),
+    (alert("earn", 90_00, "EASECAB MOBI"), None),                  # employer money is never taxi
+    (alert("earn", 928_37), None),
+    (alert("exp", 45_00, PARTNER), "split"),                       # partner's half
+    (alert("exp", 135_00, PARTNER), "split"),
+    (alert("exp", 180_00, PARTNER), "refund"),                     # paying back his refunds
+    (alert("exp", 90_00, "9914623976@P"), "refund"),
+    (alert("exp", 90_00, "RAKHPREET S"), "refund"),                # refunding a user myself
+    (alert("exp", 45_00, "RAKHPREET S"), "refund"),
+    (alert("exp", 220_00, "BAJWA FILLIN"), None),
+])
+def test_taxi_rules(t, rule):
+    assert bank.taxi_rule(t, PARTNER) == rule
+
+
+def test_without_a_partner_set_only_the_90_and_45_rules_apply():
+    assert bank.taxi_rule(alert("exp", 135_00, PARTNER), "") is None
+    assert bank.taxi_rule(alert("exp", 45_00, PARTNER), "") == "refund"
 
 
 # --- recording --------------------------------------------------------------
 
+ALL = ("2000-01-01", "2100-01-01")
+
+
 def test_record_files_an_entry_with_its_category_and_balance(conn):
-    eid = bank.record(conn, ME, bank.parse_alert(UPI_CREDIT), PARTNER)
+    eid = bank.record(conn, ME, bank.parse_alert(NEFT_CREDIT), PARTNER)
     e = db.get_entry(conn, ME, eid)
-    assert (e["kind"], e["amount"], e["name"], e["category_name"], e["on_date"], e["bank_ref"]) == \
-        ("earn", 90_00, "SUNIL DUTT", bank.UNCLAIMED, "2026-10-28", "666700742595")
-    assert db.get_user(conn, ME)["bank_balance"] == 29829_68
+    assert (e["kind"], e["amount"], e["category_name"], e["on_date"], e["bank_ref"]) == \
+        ("earn", 928_37, None, "2026-10-27", "CITIN26750199834")
+    assert db.get_user(conn, ME)["bank_balance"] == 30168_68
 
 
-def test_the_same_alert_twice_is_one_entry(conn):
-    t = bank.parse_alert(UPI_CREDIT)
-    assert bank.record(conn, ME, t, PARTNER) is not None
-    assert bank.record(conn, ME, t, PARTNER) is None
-    assert db.count_entries(conn, ME, "2000-01-01", "2100-01-01") == 1
+def test_taxi_money_goes_to_the_taxi_log_not_the_ledger(conn):
+    bank.record(conn, ME, bank.parse_alert(UPI_CREDIT), PARTNER)
+    bank.record(conn, ME, bank.parse_alert(UPI_DEBIT), PARTNER)
+    assert db.count_entries(conn, ME, *ALL) == 0
+    assert db.summary(conn, ME, *ALL)["earned"] == 0
+    assert [(t["party"], t["rule"]) for t in db.taxi_log(conn, ME, *ALL)] == \
+        [(PARTNER, "split"), ("SUNIL DUTT", "in")]
+    assert db.get_user(conn, ME)["bank_balance"] == 29784_68   # the balance still updates
+
+
+def test_the_same_alert_twice_is_one_row(conn):
+    for text in (UPI_CREDIT, NEFT_CREDIT):
+        t = bank.parse_alert(text)
+        assert bank.record(conn, ME, t, PARTNER) is not None
+        assert bank.record(conn, ME, t, PARTNER) is None
+    assert db.count_entries(conn, ME, *ALL) == 1 and len(db.taxi_log(conn, ME, *ALL)) == 1
 
 
 def test_bank_refs_are_per_ledger(conn):
@@ -121,10 +146,42 @@ def test_bank_refs_are_per_ledger(conn):
 
 
 def test_editing_a_bank_entry_keeps_it_deduplicated(conn):
-    t = bank.parse_alert(UPI_CREDIT)
+    t = bank.parse_alert(NEFT_CREDIT)
     eid = bank.record(conn, ME, t, PARTNER)
-    db.update_entry(conn, ME, eid, name="Sunil, taxi", category_id=None)
+    db.update_entry(conn, ME, eid, name="PayPal", category_id=None)
     assert bank.record(conn, ME, t, PARTNER) is None
+
+
+def test_legit_moves_a_taxi_row_into_the_ledger_once(conn):
+    t = bank.parse_alert(UPI_CREDIT)
+    tid = bank.record(conn, ME, t, PARTNER)
+    assert db.taxi_to_ledger(conn, OTHER, tid) is None              # not theirs
+    e = db.get_entry(conn, ME, db.taxi_to_ledger(conn, ME, tid))
+    assert (e["kind"], e["amount"], e["name"], e["category_id"], e["bank_ref"]) == \
+        ("earn", 90_00, "SUNIL DUTT", None, "666700742595")
+    assert db.taxi_log(conn, ME, *ALL) == []
+    assert bank.record(conn, ME, t, PARTNER) is None                # a re-read alert stays legit
+    assert db.taxi_log(conn, ME, *ALL) == []
+
+
+def test_old_taxi_entries_move_out_of_the_ledger_once(conn):
+    conn.execute("DROP TABLE taxi")                                 # a database from before
+    unclaimed = db.create_category(conn, ME, "Taxi bot unclaimed")
+    split = db.create_category(conn, ME, "Taxi bot split")
+    food = db.create_category(conn, ME, "food")
+    db.add_entry(conn, ME, "earn", 90_00, "SUNIL", unclaimed, "2026-10-28")
+    db.add_entry(conn, ME, "exp", 45_00, PARTNER, split, "2026-10-28")
+    db.add_bank_entry(conn, ME, "exp", 45_00, "SOMEONE", None, "2026-10-28", "r1")
+    db.add_bank_entry(conn, ME, "exp", 90_00, "DHABA", food, "2026-10-28", "r2")   # already sorted
+    db.add_entry(conn, ME, "exp", 90_00, "haircut", None, "2026-10-28")            # typed by hand
+    db.init(conn)
+    assert sorted(e["name"] for e in db.list_entries(conn, ME, *ALL)) == ["DHABA", "haircut"]
+    assert sorted((t["party"], t["rule"]) for t in db.taxi_log(conn, ME, *ALL)) == \
+        [(PARTNER, "split"), ("SOMEONE", "refund"), ("SUNIL", "in")]
+    assert [c["name"] for c in db.list_categories(conn, ME)] == ["food"]
+    db.create_category(conn, ME, "Taxi bot split")                  # made again by hand: left alone
+    db.init(conn)
+    assert len(db.list_categories(conn, ME)) == 2
 
 
 # --- polling Gmail ----------------------------------------------------------
@@ -197,12 +254,12 @@ def add(conn, kind, amount, cat, on, uid=ME):
 
 
 def test_taxi_pool(conn):
-    for _ in range(10):
-        add(conn, "earn", 90_00, bank.UNCLAIMED, "2026-10-28")    # 10 × ₹90 = ₹900 in
-    add(conn, "exp", 90_00, bank.REFUND, "2026-10-28")             # one refunded
-    add(conn, "exp", 200_00, bank.SPLIT, "2026-10-28")             # sent to partner
-    add(conn, "earn", 90_00, bank.UNCLAIMED, "2026-10-28", uid=OTHER)
-    p = db.taxi_pool(conn, ME, bank.UNCLAIMED, bank.REFUND, bank.SPLIT)
+    for i in range(10):                                              # 10 × ₹90 = ₹900 in
+        db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-10-28", f"in{i}")
+    db.add_taxi(conn, ME, "exp", 90_00, "U", "refund", "2026-10-28", "f")       # one refunded
+    db.add_taxi(conn, ME, "exp", 200_00, PARTNER, "split", "2026-10-28", "s")   # sent to partner
+    db.add_taxi(conn, OTHER, "earn", 90_00, "U", "in", "2026-10-28", "x")
+    p = db.taxi_pool(conn, ME)
     assert p == {"received": 900_00, "received_n": 10, "refunded": 90_00, "refunded_n": 1,
                  "sent": 200_00, "sent_n": 1, "partner_half": 405_00, "owed": 205_00}
 
@@ -213,7 +270,6 @@ def test_salary_counts_only_spending_since_it_landed(conn):
     add(conn, "earn", 60000_00, "salary", "2026-10-26")
     add(conn, "exp", 500_00, "food", "2026-10-26")
     add(conn, "exp", 250_00, None, "2026-10-27")
-    add(conn, "exp", 45_00, bank.SPLIT, "2026-10-28")              # taxi money isn't salary money
     add(conn, "exp", 999_00, "food", "2026-10-28", uid=OTHER)
     s = db.salary_status(conn, ME, "salary")
     assert s == {"on_date": "2026-10-26", "amount": 60000_00, "spent": 750_00, "left": 59250_00}

@@ -37,27 +37,29 @@ as an entry (tagged "bank"). It also keeps the balance from the latest alert.
 
 - `.env`: `GMAIL_USER`, `GMAIL_APP_PASSWORD` (Google App Password, needs
   2-Step Verification and IMAP on), `BANK_PARTNER` (partner's UPI as shown in
-  alerts). No Gmail keys = sync off.
+  alerts), `BANK_PARTNER_NAME` (shown instead of that UPI). No Gmail keys = sync off.
 - No history import: the first run only notes where the inbox is and records
   mail from then on. The bank ref number stops duplicates.
 - An alert it can't read (e.g. a card swipe) shows on Entries as
   "Couldn't read a bank email". Add it by hand, then dismiss.
 
-Auto categories:
+Taxi bot money never enters the ledger: no category, no totals, no budgets.
+It goes to a separate log on the Overview's Taxi bot card:
 
-| Alert | Category |
+| Alert | Logged as |
 |---|---|
-| ₹90 in | Taxi bot unclaimed |
-| ₹90 out, or a whole ₹90s to the partner | Taxi bot refund |
-| any other amount to the partner | Taxi bot split |
+| ₹90 or ₹45 in | in |
+| ₹90 or ₹45 out, or whole ₹90s to the partner | refund |
+| any other amount to the partner | to partner |
 
-The Taxi bot card shows payments received, refunded, the partner's 50% of
-what's left, what was sent, and what's still owed.
+The card shows payments received, refunded, the partner's 50% of what's left,
+what was sent, and what's still owed. A real expense or earning that happened
+to be ₹90/₹45: tap **Legit** to move it into Entries and categorize it.
 
 ## Salary and budgets
 
 Tag the salary credit "Salary". The Salary card counts spending from the day
-the latest salary landed (taxi bot money excluded) and shows what's left.
+the latest salary landed and shows what's left.
 
 Settings → Categories → Budget sets a monthly limit per category (empty or 0
 clears it). Overview and Categories show progress bars.

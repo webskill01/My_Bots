@@ -303,9 +303,8 @@ function wireBankNotice() {
 }
 
 // ---- money right now: bank balance, salary left, what the partner is owed ----
-const TAXI_IN = 'taxi bot unclaimed';
 const meterColor = (used, cap) => (used > cap ? 'var(--bad)' : used * 100 >= cap * 80 ? 'var(--deep)' : 'var(--ok)');
-const hasTaxi = () => S.taxi.received_n || S.taxi.sent_n || S.taxi.refunded_n;
+const hasTaxi = () => S.taxi.received_n || S.taxi.sent_n || S.taxi.refunded_n || S.taxi_log.length;
 function nowTiles() {
   const tiles = [];
   if (S.bank && S.bank.balance != null) tiles.push(`<div class="tile"><div class="l">In the bank</div><div class="v">${money(S.bank.balance)}</div><div class="s">from the latest alert</div></div>`);
@@ -321,18 +320,32 @@ function salaryCard() {
     <div class="meter" style="--tc:${meterColor(s.spent, s.amount)}"><i style="--v:${pct(s.spent, s.amount)}"></i></div>
     <p class="hint">${pct(s.spent, s.amount)}% used since it landed · taxi bot money isn’t counted</p></div>`;
 }
+// Taxi bot money lives in its own log: never in totals, categories or budgets.
+const TAXI_RULE = { in: 'in', refund: 'refund', split: 'to partner' };
 function taxiCard() {
   if (!hasTaxi()) return '';
   const t = S.taxi;
-  const month = S.entries.filter(e => e.kind === 'earn' && (e.category || '').toLowerCase() === TAXI_IN).length;
   const line = (l, n, v, cls = '') => `<div class="mrow"><span class="ml">${l}</span><span class="muted small">${n}</span><span class="mv ${cls}">${v}</span></div>`;
+  const log = S.taxi_log.map(x => `<div class="mrow">
+      <span class="ml">${esc(x.party) || '—'}</span>
+      <span class="muted small">${esc(fmtDate(x.on_date, { day: 'numeric', month: 'short' }))} · ${TAXI_RULE[x.rule]}</span>
+      <span class="mv ${x.kind === 'earn' ? 'pos' : ''}">${money(x.amount, x.kind === 'earn')}
+        <button class="b sm line" data-legit="${x.id}" type="button" title="A real expense or earning: move it to the ledger">Legit</button></span></div>`).join('');
   return `<div class="card"><h2>Taxi bot</h2>
     ${line('Received', `${t.received_n} payments`, money(t.received, true), 'pos')}
     ${line('Refunded', `${t.refunded_n}×`, money(t.refunded))}
     ${line('Partner’s half', 'of what’s left', money(t.partner_half))}
     ${line('Sent to partner', `${t.sent_n}×`, money(t.sent))}
     ${line(t.owed < 0 ? 'Overpaid' : 'Still owed', '', money(Math.abs(t.owed)), t.owed > 0 ? 'neg' : '')}
-    <p class="hint">All time. ${month} ${month === 1 ? 'payment' : 'payments'} in ${esc(monthName(S.month))}. ₹90 in is filed as “Taxi bot unclaimed”, ₹90 out (or whole ₹90s to your partner) as “Taxi bot refund”, other amounts to your partner as “Taxi bot split”.</p></div>`;
+    ${log ? `<h2 style="margin-top:16px">${esc(monthName(S.month))} · ${S.taxi_log.length}</h2>${log}` : ''}
+    <p class="hint">Kept apart from your spending and earnings. ₹90 and ₹45 bank payments, and transfers to your partner, land here. One that was a real expense or earning? Tap Legit to move it to Entries and give it a category.</p></div>`;
+}
+function wireTaxi() {
+  $$('[data-legit]').forEach(btn => btn.onclick = () => busy(btn, async () => {
+    const { entry } = await api(`/api/taxi/${btn.dataset.legit}/legit`, {});
+    await refresh(true);
+    openEdit(entry);
+  }));
 }
 // categories with their own budget, against spending this pay cycle (26th to 25th)
 function budgetsCard() {
@@ -557,6 +570,7 @@ function overviewView() {
         ${top.length ? `<div class="card"><h2>Top spends</h2>${top.map(x => `<div class="mrow"><span class="ml">${esc(x.name)}</span><span class="muted small">${x.count}×</span><span class="mv">${money(x.total)}</span></div>`).join('')}</div>` : ''}
       </div>
     </div>` : `<div class="empty">Nothing recorded in ${esc(monthName(m))}. Add entries from the Entries tab.</div>`}`;
+  wireTaxi();
 }
 
 // ---- Categories ----

@@ -50,7 +50,7 @@ RECENT_DAYS = 90                 # how far back "recent items" look
 FUTURE_DAYS = 7                  # an entry may sit this far ahead (a bill due soon)
 
 AUTH = {"pin": "", "admin": "admin"}
-CFG = {"db": "", "admin_uid": 0}
+CFG = {"db": "", "admin_uid": 0, "partner": "", "partner_name": ""}
 FAILS: dict[str, list[float]] = {}   # client IP -> wrong-login timestamps
 
 _MONTH = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
@@ -91,12 +91,18 @@ def new_session(conn, user_id: int) -> str:
 
 # --- shapes -----------------------------------------------------------------
 
+def who(party: str) -> str:
+    """The partner's UPI handle reads as their name (BANK_PARTNER_NAME)."""
+    p = CFG["partner"]
+    return CFG["partner_name"] if p and CFG["partner_name"] and party.lower() == p.lower() else party
+
+
 def entry_json(e, tz: str) -> dict:
     """`time` is when it was filed, on the user's clock: "14:05"."""
     filed = dt.datetime.fromisoformat(e["created_at"])
     if filed.tzinfo is None:   # legacy naive stamps are UTC
         filed = filed.replace(tzinfo=dt.timezone.utc)
-    return {"id": e["id"], "kind": e["kind"], "amount": e["amount"], "name": e["name"],
+    return {"id": e["id"], "kind": e["kind"], "amount": e["amount"], "name": who(e["name"]),
             "category": e["category_name"], "category_id": e["category_id"],
             "on_date": e["on_date"], "time": filed.astimezone(ZoneInfo(tz)).strftime("%H:%M"),
             "bank": bool(e["bank_ref"])}
@@ -142,7 +148,10 @@ def state(conn, user, month: str | None) -> dict:
         "categories": [dict(c) for c in db.category_counts(conn, uid)],
         "recent": recent_items(conn, uid, today, user["tz"]),
         "salary": db.salary_status(conn, uid, bank.SALARY),
-        "taxi": db.taxi_pool(conn, uid, bank.UNCLAIMED, bank.REFUND, bank.SPLIT),
+        "taxi": db.taxi_pool(conn, uid),
+        "taxi_log": [{"id": t["id"], "kind": t["kind"], "amount": t["amount"], "party": who(t["party"]),
+                      "rule": t["rule"], "on_date": t["on_date"]}
+                     for t in db.taxi_log(conn, uid, start, end)],
         "bank": bank_state(conn, user),
         "cycle": cycle_state(conn, uid, today),
     }
@@ -401,6 +410,12 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
         db.update_entry(conn, uid, int(m[1]), **fields_from(conn, uid, b, today))
         return 200, {"entry": entry_json(db.get_entry(conn, uid, int(m[1])), user["tz"])}
 
+    if m := re.fullmatch(r"/api/taxi/(\d+)/legit", path):   # not taxi money after all
+        eid = db.taxi_to_ledger(conn, uid, int(m[1]))
+        if eid is None:
+            return 404, {"error": "That one is gone"}
+        return 200, {"entry": entry_json(db.get_entry(conn, uid, eid), user["tz"])}
+
     if m := re.fullmatch(r"/api/bank/miss/(\d+)/dismiss", path):
         db.drop_bank_miss(conn, uid, int(m[1]))
         return 200, {"ok": True}
@@ -504,7 +519,8 @@ def serve(db_path: str) -> None:
     if len(pin) < 6:
         sys.exit("Set FINANCE_PIN in .env (6+ characters)")
     AUTH.update(pin=pin, admin=os.environ.get("FINANCE_ADMIN_NAME", "admin"))
-    CFG["db"] = db_path
+    CFG.update(db=db_path, partner=os.environ.get("BANK_PARTNER", ""),
+               partner_name=os.environ.get("BANK_PARTNER_NAME", ""))
     conn = db.connect(db_path)
     db.init(conn)
     uid = os.environ.get("FINANCE_USER_ID")

@@ -230,19 +230,38 @@ from finance_bot import bank
 
 def test_bank_entries_are_flagged_and_bank_state_is_the_admins_only(pconn, monkeypatch):
     monkeypatch.setitem(bank.STATUS, "on", True)
-    t = {"kind": "earn", "amount": 90_00, "party": "SUNIL DUTT", "ref": "666700742595",
+    t = {"kind": "earn", "amount": 928_37, "party": "PAYPAL", "ref": "666700742595",
          "balance": 29829_68, "on_date": dt.date(2026, 10, 28)}
     bank.record(pconn, TG, t, "")
     db.add_bank_miss(pconn, TG, "Debit card transaction", "Rs.500 debited")
     s = panel.state(pconn, me(pconn), "2026-10")
-    assert [(e["name"], e["bank"], e["category"]) for e in s["entries"]] == [("SUNIL DUTT", True, bank.UNCLAIMED)]
+    assert [(e["name"], e["bank"], e["category"]) for e in s["entries"]] == [("PAYPAL", True, None)]
     assert s["bank"]["balance"] == 29829_68
     assert [m["subject"] for m in s["bank"]["misses"]] == ["Debit card transaction"]
-    assert s["taxi"]["received_n"] == 1
     assert panel.state(pconn, me(pconn, OLD), "2026-10")["bank"] is None
     miss = s["bank"]["misses"][0]["id"]
     panel.act(pconn, me(pconn), f"/api/bank/miss/{miss}/dismiss", {})
     assert panel.state(pconn, me(pconn), "2026-10")["bank"]["misses"] == []
+
+
+def test_taxi_log_stays_out_of_the_month_and_legit_moves_it_in(pconn, monkeypatch):
+    monkeypatch.setitem(panel.CFG, "partner", "9914623976@p")
+    monkeypatch.setitem(panel.CFG, "partner_name", "Tanishq")
+    pay = {"kind": "earn", "amount": 90_00, "party": "SUNIL DUTT", "ref": "r1",
+           "balance": 1, "on_date": dt.date(2026, 10, 28)}
+    bank.record(pconn, TG, pay, "9914623976@p")
+    bank.record(pconn, TG, dict(pay, kind="exp", amount=45_00, party="9914623976@p", ref="r2"),
+                "9914623976@p")
+    s = panel.state(pconn, me(pconn), "2026-10")
+    assert s["entries"] == [] and s["months"] == []
+    assert [(x["party"], x["rule"]) for x in s["taxi_log"]] == [("Tanishq", "split"), ("SUNIL DUTT", "in")]
+    assert (s["taxi"]["received_n"], s["taxi"]["sent_n"]) == (1, 1)
+    tid = s["taxi_log"][1]["id"]
+    assert panel.act(pconn, me(pconn, OLD), f"/api/taxi/{tid}/legit", {})[0] == 404
+    code, out = panel.act(pconn, me(pconn), f"/api/taxi/{tid}/legit", {})
+    assert code == 200 and (out["entry"]["name"], out["entry"]["category"]) == ("SUNIL DUTT", None)
+    s = panel.state(pconn, me(pconn), "2026-10")
+    assert [e["amount"] for e in s["entries"]] == [90_00] and len(s["taxi_log"]) == 1
 
 
 def test_hand_entries_are_not_bank_entries(pconn):

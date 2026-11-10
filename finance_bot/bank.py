@@ -7,7 +7,7 @@ Every entry it files can be corrected in the panel like any other.
 
 Env: GMAIL_USER, GMAIL_APP_PASSWORD (Google account -> Security -> App
 passwords), BANK_PARTNER (the partner's UPI handle exactly as the debit alerts
-show it, e.g. 99xxxxxxxx@p).
+show it, e.g. 99xxxxxxxx@p), BANK_PARTNER_NAME (shown instead of that handle).
 """
 
 import datetime as dt
@@ -33,9 +33,7 @@ POLL = 30            # seconds between checks
 RETRY = 120          # after an error, before reconnecting
 
 TAXI = 90_00                          # every taxi bot payment is ₹90
-UNCLAIMED = "Taxi bot unclaimed"      # ₹90 in from a user
-SPLIT = "Taxi bot split"              # the partner's share, sent to them
-REFUND = "Taxi bot refund"            # ₹90 back to a user, or repaying the partner who refunded
+TAXI_AMOUNTS = {90_00, 45_00}         # a payment, or the partner's half of one
 SALARY = "Salary"
 PAYDAY = 26                           # budgets run from the 26th to the 25th
 EMPLOYER = "EASECAB"                  # salary lands as "EASECAB MOBI..."
@@ -72,26 +70,39 @@ def parse_alert(text: str) -> dict | None:
             "balance": balance, "on_date": dt.date(y + 2000 if y < 100 else y, int(m["m"]), int(m["d"]))}
 
 
-def category_for(t: dict, partner: str) -> str | None:
-    """The owner's rules. A best guess: anything wrong gets fixed at night."""
+def is_employer(t: dict) -> bool:
+    return t["party"].upper().startswith(EMPLOYER)
+
+
+def category_for(t: dict) -> str | None:
+    if t["kind"] == "earn" and is_employer(t):
+        return SALARY if t["amount"] >= SALARY_MIN else None
+    return None
+
+
+def taxi_rule(t: dict, partner: str) -> str | None:
+    """Taxi bot money goes to its own log, never the ledger: 'in', 'refund'
+    or 'split'. A false catch is moved over by hand ("legit")."""
     if t["kind"] == "earn":
-        if t["party"].upper().startswith(EMPLOYER):
-            return SALARY if t["amount"] >= SALARY_MIN else None
-        return UNCLAIMED if t["amount"] == TAXI else None
+        return "in" if t["amount"] in TAXI_AMOUNTS and not is_employer(t) else None
     if partner and t["party"].lower() == partner.lower():
         # whole ₹90s repay refunds he made for us; anything else is his share
-        return REFUND if t["amount"] % TAXI == 0 else SPLIT
-    return REFUND if t["amount"] == TAXI else None
+        return "refund" if t["amount"] % TAXI == 0 else "split"
+    return "refund" if t["amount"] in TAXI_AMOUNTS else None
 
 
 def record(conn, user_id: int, t: dict, partner: str) -> int | None:
-    """The new entry's id, or None when this transaction was already filed."""
-    cat = category_for(t, partner)
-    cid = db.get_or_create_category(conn, user_id, cat) if cat else None
-    eid = db.add_bank_entry(conn, user_id, t["kind"], t["amount"], t["party"][:100], cid,
-                            t["on_date"], t["ref"])
+    """The new row's id (ledger or taxi log), or None when already filed."""
+    if rule := taxi_rule(t, partner):
+        rid = db.add_taxi(conn, user_id, t["kind"], t["amount"], t["party"][:100], rule,
+                          t["on_date"], t["ref"])
+    else:
+        cat = category_for(t)
+        cid = db.get_or_create_category(conn, user_id, cat) if cat else None
+        rid = db.add_bank_entry(conn, user_id, t["kind"], t["amount"], t["party"][:100], cid,
+                                t["on_date"], t["ref"])
     db.set_bank_balance(conn, user_id, t["balance"])
-    return eid
+    return rid
 
 
 def read_mail(raw: bytes) -> tuple[str, str]:
@@ -162,8 +173,7 @@ def start(db_path: str, user_id: int) -> bool:
         log.info("bank sync off: set GMAIL_USER and GMAIL_APP_PASSWORD to turn it on")
         return False
     conn = db.connect(db_path)
-    for name in (SALARY, UNCLAIMED, REFUND, SPLIT):     # ready to pick before the first alert
-        db.get_or_create_category(conn, user_id, name)
+    db.get_or_create_category(conn, user_id, SALARY)     # ready to pick before the first alert
     conn.close()
     STATUS["on"] = True
     threading.Thread(target=_run, args=(db_path, user_id, (user, password),
