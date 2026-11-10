@@ -49,7 +49,7 @@ It goes to a separate log. On Entries, pick **Without taxi** (default),
 
 | Alert | Logged as |
 |---|---|
-| ₹90, ₹99, ₹100 or ₹45 in | in |
+| ₹90 or ₹45 in | in |
 | ₹90 or ₹45 out, or whole ₹90s to the partner | refund |
 | any other amount to the partner | to partner |
 

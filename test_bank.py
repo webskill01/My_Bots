@@ -90,9 +90,7 @@ def test_category_rules(t, category):
 @pytest.mark.parametrize("t, rule", [
     (alert("earn", 90_00), "in"),                                  # a taxi bot payment
     (alert("earn", 45_00), "in"),
-    (alert("earn", 99_00), "in"),                                  # users round up
-    (alert("earn", 100_00), "in"),
-    (alert("exp", 100_00, "RAKHPREET S"), None),                   # only incoming rounds up
+    (alert("earn", 100_00), None),                                 # rare, usually real money
     (alert("earn", 90_00, "EASECAB MOBI"), None),                  # employer money is never taxi
     (alert("earn", 928_37), None),
     (alert("exp", 45_00, PARTNER), "split"),                       # partner's half

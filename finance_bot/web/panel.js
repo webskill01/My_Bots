@@ -349,7 +349,7 @@ function taxiSummary() {
     ${line('Sent to partner', `${t.sent_n}×`, money(t.sent))}
     ${line(t.owed < 0 ? 'Overpaid' : 'Still owed', '', money(Math.abs(t.owed)), t.owed > 0 ? 'neg' : '')}
     <div class="acts"><button class="b sm line" id="settle" type="button">Settled up today</button></div>
-    <p class="hint">Not counted in your spending or earnings. ₹90, ₹99, ₹100 or ₹45 in, ₹90 or ₹45 out, and transfers to your partner land here. Tap one that was a real expense or earning to move it to your entries.</p></div>`;
+    <p class="hint">Not counted in your spending or earnings. ₹90 or ₹45 in or out, and transfers to your partner land here. Tap one that was a real expense or earning to move it to your entries.</p></div>`;
 }
 function wireTaxi() {
   const b = $('#settle');
