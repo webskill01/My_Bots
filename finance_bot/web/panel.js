@@ -100,12 +100,11 @@ function byCategory(kind, list = S.entries) {
 }
 const spentOn = d => S.entries.filter(e => e.kind === 'exp' && e.on_date === d).reduce((a, e) => a + e.amount, 0);
 const catTag = e => (e.category ? `<span class="tag" style="--tc:${tc(e.category)}">${esc(e.category)}</span>` : '');
-const bankTag = e => (e.bank ? '<span class="tag" style="--tc:#0b6e76" title="Recorded from a bank alert">bank</span>' : '');
 const byTime = (a, b) => a.time.localeCompare(b.time) || a.id - b.id;
 
 // an entry row; `timed` puts the time it was added in its own column
 function row(e, timed) {
-  const meta = [catTag(e), bankTag(e), timed ? '' : `<span>${fmtTime(e.time)}</span>`].filter(Boolean).join('');
+  const meta = [catTag(e), timed ? '' : `<span>${fmtTime(e.time)}</span>`].filter(Boolean).join('');
   return `<div class="row ${e.kind} ${timed ? 'timed' : ''}" data-open="${e.id}" tabindex="0" style="--tc:${e.category ? tc(e.category) : 'var(--line)'}">
     ${timed ? `<div class="tm">${fmtTime(e.time).replace(' ', '<small>')}</small></div>` : ''}
     <div style="min-width:0"><div class="t1">${esc(e.name) || '<span class="muted">—</span>'}</div>${meta ? `<div class="t2">${meta}</div>` : ''}</div>
