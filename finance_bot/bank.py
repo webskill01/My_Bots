@@ -36,7 +36,7 @@ RETRY = 120          # after an error, before reconnecting
 TAXI = 90_00                          # every taxi bot payment is ₹90
 TAXI_AMOUNTS = {90_00, 45_00}         # a payment, or the partner's half of one
 SALARY = "Salary"
-TAXI_CAT = "taxi"                     # where each settle-up lands as one earning
+TAXI_CAT = "taxi"                     # the one category for taxi bot money
 EMPLOYER = "EASECAB"                  # salary lands as "EASECAB MOBI..."
 SALARY_MIN = 5000_00                  # ponytail: smaller employer credits (refunds) aren't salary
 
@@ -81,13 +81,22 @@ def category_for(t: dict) -> str | None:
     return None
 
 
+def is_partner(party: str, partner: str) -> bool:
+    return any(party.lower().startswith(n) for n in
+               (p.strip().lower() for p in partner.split(",")) if n)
+
+
+def hand_rule(kind: str, name: str, partner: str) -> str:
+    """An entry you put in the taxi category yourself."""
+    return "split" if is_partner(name, partner) else "in" if kind == "earn" else "refund"
+
+
 def taxi_rule(t: dict, partner: str) -> str | None:
-    """Taxi bot money goes to its own log, never the ledger: 'in', 'refund'
-    or 'split'. A false catch is moved over by hand ("legit"). `partner` is
+    """Taxi bot money: 'in', 'refund' or 'split', filed under the taxi category
+    and kept out of totals. A false catch is recategorized by hand. `partner` is
     his UPI handle and name, comma-separated: debits show the handle, credits
     his (cut-off) name."""
-    names = [p.strip().lower() for p in partner.split(",") if p.strip()]
-    to_partner = any(t["party"].lower().startswith(n) for n in names)
+    to_partner = is_partner(t["party"], partner)
     if t["kind"] == "earn":   # money back from the partner nets off what he was sent
         return "split" if to_partner else "in" if t["amount"] in TAXI_AMOUNTS and not is_employer(t) else None
     if to_partner:
@@ -97,15 +106,12 @@ def taxi_rule(t: dict, partner: str) -> str | None:
 
 
 def record(conn, user_id: int, t: dict, partner: str) -> int | None:
-    """The new row's id (ledger or taxi log), or None when already filed."""
-    if rule := taxi_rule(t, partner):
-        rid = db.add_taxi(conn, user_id, t["kind"], t["amount"], t["party"][:100], rule,
-                          t["on_date"], t["ref"])
-    else:
-        cat = category_for(t)
-        cid = db.get_or_create_category(conn, user_id, cat) if cat else None
-        rid = db.add_bank_entry(conn, user_id, t["kind"], t["amount"], t["party"][:100], cid,
-                                t["on_date"], t["ref"])
+    """The new entry's id, or None when already filed."""
+    rule = taxi_rule(t, partner)
+    cat = TAXI_CAT if rule else category_for(t)
+    cid = db.get_or_create_category(conn, user_id, cat) if cat else None
+    rid = db.add_bank_entry(conn, user_id, t["kind"], t["amount"], t["party"][:100], cid,
+                            t["on_date"], t["ref"], rule)
     db.set_bank_balance(conn, user_id, t["balance"])
     return rid
 

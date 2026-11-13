@@ -244,7 +244,7 @@ def test_bank_entries_are_flagged_and_bank_state_is_the_admins_only(pconn, monke
     assert panel.state(pconn, me(pconn), "2026-10")["bank"]["misses"] == []
 
 
-def test_taxi_log_stays_out_of_the_month_and_legit_moves_it_in(pconn, monkeypatch):
+def test_taxi_money_is_editable_under_one_category(pconn, monkeypatch):
     monkeypatch.setitem(panel.CFG, "partner", "9914623976@p")
     monkeypatch.setitem(panel.CFG, "partner_name", "Tanishq")
     pay = {"kind": "earn", "amount": 90_00, "party": "SUNIL DUTT", "ref": "r1",
@@ -254,18 +254,25 @@ def test_taxi_log_stays_out_of_the_month_and_legit_moves_it_in(pconn, monkeypatc
                 "9914623976@p")
     s = panel.state(pconn, me(pconn), "2026-10")
     assert s["entries"] == [] and s["months"] == []
-    assert [(x["party"], x["rule"]) for x in s["taxi_log"]] == [("Tanishq", "split"), ("SUNIL DUTT", "in")]
-    assert (s["taxi"]["received_n"], s["taxi"]["sent_n"]) == (1, 1)
-    tid = s["taxi_log"][1]["id"]
-    assert panel.act(pconn, me(pconn, OLD), f"/api/taxi/{tid}/legit", {})[0] == 404
-    code, out = panel.act(pconn, me(pconn), f"/api/taxi/{tid}/legit", {})
-    assert code == 200 and (out["entry"]["name"], out["entry"]["category"]) == ("SUNIL DUTT", None)
+    assert [(x["name"], x["taxi"], x["category"]) for x in s["taxi_log"]] == \
+        [("Tanishq", "split", "taxi"), ("SUNIL DUTT", "in", "taxi")]
+    sunil = s["taxi_log"][1]
+    edit = {"kind": "earn", "amount": "100", "name": "SUNIL DUTT", "category": "taxi", "on_date": "2026-10-28"}
+    panel.act(pconn, me(pconn), f"/api/entry/{sunil['id']}", edit)                  # he paid ₹100
+    _, out = panel.act(pconn, me(pconn), "/api/entry", dict(edit, amount="90", name="cash rider"))
+    assert out["entry"]["taxi"] == "in"                                             # added by hand
+    _, out = panel.act(pconn, me(pconn), "/api/quick", {"text": "50 tanishq #taxi 28/10/2026"})
+    assert out["entry"]["taxi"] == "split"
     s = panel.state(pconn, me(pconn), "2026-10")
-    assert [e["amount"] for e in s["entries"]] == [90_00] and len(s["taxi_log"]) == 1
-    code, out = panel.act(pconn, me(pconn), "/api/taxi/settle", {})   # only ₹45 went to the partner
+    assert (s["taxi"]["received"], s["taxi"]["sent"], s["entries"]) == (190_00, 95_00, [])
+    panel.act(pconn, me(pconn), f"/api/entry/{sunil['id']}", dict(edit, category=""))   # not taxi
+    s = panel.state(pconn, me(pconn), "2026-10")
+    assert [e["amount"] for e in s["entries"]] == [100_00] and s["entries"][0]["taxi"] is None
+    code, out = panel.act(pconn, me(pconn), "/api/taxi/settle", {})                 # ₹90 in: half is ₹45
     assert code == 200 and (out["entry"]["kind"], out["entry"]["amount"], out["entry"]["category"],
-                            out["entry"]["name"]) == ("exp", 45_00, "taxi", "Taxi bot · settled with Tanishq")
-    assert panel.state(pconn, me(pconn), "2026-10")["taxi"]["sent_n"] == 0
+                            out["entry"]["name"]) == ("earn", 45_00, None, "Taxi bot · settled with Tanishq")
+    t = panel.state(pconn, me(pconn), "2026-11")["taxi"]
+    assert (t["sent_n"], t["owed"]) == (0, 45_00 - 95_00)                          # he owes you ₹50
 
 
 def test_hand_entries_are_not_bank_entries(pconn):

@@ -130,13 +130,13 @@ def test_record_files_an_entry_with_its_category_and_balance(conn):
     assert db.get_user(conn, ME)["bank_balance"] == 30168_68
 
 
-def test_taxi_money_goes_to_the_taxi_log_not_the_ledger(conn):
+def test_taxi_money_goes_under_taxi_and_out_of_totals(conn):
     bank.record(conn, ME, bank.parse_alert(UPI_CREDIT), PARTNER)
     bank.record(conn, ME, bank.parse_alert(UPI_DEBIT), PARTNER)
-    assert db.count_entries(conn, ME, *ALL) == 0
-    assert db.summary(conn, ME, *ALL)["earned"] == 0
-    assert [(t["party"], t["rule"]) for t in db.taxi_log(conn, ME, *ALL)] == \
-        [(PARTNER, "split"), ("SUNIL DUTT", "in")]
+    assert db.list_entries(conn, ME, *ALL, taxi=False) == []
+    assert db.summary(conn, ME, *ALL)["earned"] == 0 and db.month_totals(conn, ME) == []
+    assert [(e["name"], e["taxi"], e["category_name"]) for e in db.list_entries(conn, ME, *ALL, taxi=True)] == \
+        [(PARTNER, "split", "taxi"), ("SUNIL DUTT", "in", "taxi")]
     assert db.get_user(conn, ME)["bank_balance"] == 29784_68   # the balance still updates
 
 
@@ -145,7 +145,7 @@ def test_the_same_alert_twice_is_one_row(conn):
         t = bank.parse_alert(text)
         assert bank.record(conn, ME, t, PARTNER) is not None
         assert bank.record(conn, ME, t, PARTNER) is None
-    assert db.count_entries(conn, ME, *ALL) == 1 and len(db.taxi_log(conn, ME, *ALL)) == 1
+    assert db.count_entries(conn, ME, *ALL) == 2
 
 
 def test_bank_refs_are_per_ledger(conn):
@@ -160,36 +160,20 @@ def test_editing_a_bank_entry_keeps_it_deduplicated(conn):
     assert bank.record(conn, ME, t, PARTNER) is None
 
 
-def test_legit_moves_a_taxi_row_into_the_ledger_once(conn):
-    t = bank.parse_alert(UPI_CREDIT)
-    tid = bank.record(conn, ME, t, PARTNER)
-    assert db.taxi_to_ledger(conn, OTHER, tid) is None              # not theirs
-    e = db.get_entry(conn, ME, db.taxi_to_ledger(conn, ME, tid))
-    assert (e["kind"], e["amount"], e["name"], e["category_id"], e["bank_ref"]) == \
-        ("earn", 90_00, "SUNIL DUTT", None, "666700742595")
-    assert db.taxi_log(conn, ME, *ALL) == []
-    assert bank.record(conn, ME, t, PARTNER) is None                # a re-read alert stays legit
-    assert db.taxi_log(conn, ME, *ALL) == []
-
-
-def test_old_taxi_entries_move_out_of_the_ledger_once(conn):
-    conn.execute("DROP TABLE taxi")                                 # a database from before
-    unclaimed = db.create_category(conn, ME, "Taxi bot unclaimed")
-    split = db.create_category(conn, ME, "Taxi bot split")
-    food = db.create_category(conn, ME, "food")
-    db.add_entry(conn, ME, "earn", 90_00, "SUNIL", unclaimed, "2026-10-28")
-    db.add_entry(conn, ME, "exp", 45_00, PARTNER, split, "2026-10-28")
-    db.add_bank_entry(conn, ME, "exp", 45_00, "SOMEONE", None, "2026-10-28", "r1")
-    db.add_bank_entry(conn, ME, "exp", 90_00, "DHABA", food, "2026-10-28", "r2")   # already sorted
-    db.add_entry(conn, ME, "exp", 90_00, "haircut", None, "2026-10-28")            # typed by hand
+def test_the_old_taxi_log_moves_into_the_ledger_once(conn):
+    conn.execute("CREATE TABLE taxi (id INTEGER PRIMARY KEY, user_id INTEGER, kind TEXT, amount INTEGER,"
+                 " party TEXT, rule TEXT, on_date TEXT, bank_ref TEXT, created_at TEXT)")
+    rows = [(ME, "earn", 90_00, "SUNIL", "in", "r1", "2026-11-01T00:00:00+00:00"),
+            (ME, "exp", 45_00, PARTNER, "split", "r2", "2026-11-03T00:00:00+00:00")]
+    conn.executemany("INSERT INTO taxi (user_id, kind, amount, party, rule, on_date, bank_ref, created_at)"
+                     " VALUES (?, ?, ?, ?, ?, '2026-11-01', ?, ?)", rows)
+    conn.execute("UPDATE user SET taxi_settled_at = '2026-11-02T00:00:00+00:00' WHERE user_id = ?", (ME,))
+    conn.execute("PRAGMA user_version = 0")
     db.init(conn)
-    assert sorted(e["name"] for e in db.list_entries(conn, ME, *ALL)) == ["DHABA", "haircut"]
-    assert sorted((t["party"], t["rule"]) for t in db.taxi_log(conn, ME, *ALL)) == \
-        [(PARTNER, "split"), ("SOMEONE", "refund"), ("SUNIL", "in")]
-    assert [c["name"] for c in db.list_categories(conn, ME)] == ["food"]
-    db.create_category(conn, ME, "Taxi bot split")                  # made again by hand: left alone
-    db.init(conn)
-    assert len(db.list_categories(conn, ME)) == 2
+    db.init(conn)                                                   # only once
+    got = [(e["name"], e["taxi"], e["taxi_done"], e["category_name"], e["created_at"][:10])
+           for e in db.list_entries(conn, ME, *ALL)]
+    assert got == [(PARTNER, "split", 0, "taxi", "2026-11-03"), ("SUNIL", "in", 1, "taxi", "2026-11-01")]
 
 
 # --- polling Gmail ----------------------------------------------------------
@@ -261,32 +245,38 @@ def add(conn, kind, amount, cat, on, uid=ME):
     return db.add_entry(conn, uid, kind, amount, "", cid, on)
 
 
+def taxi(conn, kind, amount, rule, name="U", uid=ME):
+    cid = db.get_or_create_category(conn, uid, "taxi")
+    return db.add_entry(conn, uid, kind, amount, name, cid, "2026-10-28", rule)
+
+
 def test_taxi_pool(conn):
-    for i in range(10):                                              # 10 × ₹90 = ₹900 in
-        db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-10-28", f"in{i}")
-    db.add_taxi(conn, ME, "exp", 90_00, "U", "refund", "2026-10-28", "f")       # one refunded
-    db.add_taxi(conn, ME, "exp", 200_00, PARTNER, "split", "2026-10-28", "s")   # sent to partner
-    db.add_taxi(conn, ME, "earn", 50_00, PARTNER, "split", "2026-10-28", "b")   # partner sent some back
-    db.add_taxi(conn, OTHER, "earn", 90_00, "U", "in", "2026-10-28", "x")
+    for _ in range(10):                                              # 10 × ₹90 = ₹900 in
+        taxi(conn, "earn", 90_00, "in")
+    taxi(conn, "exp", 90_00, "refund")                               # one refunded
+    taxi(conn, "exp", 200_00, "split", PARTNER)                      # sent to partner
+    taxi(conn, "earn", 50_00, "split", PARTNER)                      # partner sent some back
+    taxi(conn, "earn", 90_00, "in", uid=OTHER)
+    add(conn, "earn", 90_00, "taxi", "2026-10-28")                   # an old hand entry: ordinary
     p = db.taxi_pool(conn, ME)
     assert p == {"received": 900_00, "received_n": 10, "refunded": 90_00, "refunded_n": 1,
-                 "sent": 150_00, "sent_n": 2, "partner_half": 405_00, "owed": 255_00,
-                 "mine": 660_00, "settled_at": None}
+                 "sent": 150_00, "sent_n": 2, "partner_half": 405_00, "mine": 405_00,
+                 "carry": 0, "owed": 255_00, "settled_at": None}
 
 
-def test_settling_starts_the_pool_again(conn):
-    db.add_taxi(conn, ME, "earn", 90_00, "U", "in", "2026-10-28", "a")
-    conn.execute("UPDATE taxi SET created_at = '2026-11-01T00:00:00+00:00'")
-    conn.commit()
-    eid = db.settle_taxi(conn, ME, dt.date(2026, 11, 1), "Taxi settled", None)
+def test_settling_adds_your_half_and_carries_what_is_owed(conn):
+    for _ in range(12):
+        taxi(conn, "earn", 90_00, "in")                              # ₹1,080 in
+    eid = db.settle_taxi(conn, ME, dt.date(2026, 11, 13), "Taxi settled")   # before paying him
     e = db.get_entry(conn, ME, eid)
-    assert (e["kind"], e["amount"], e["name"], e["on_date"]) == ("earn", 90_00, "Taxi settled", "2026-11-01")
-    assert db.settle_taxi(conn, ME, dt.date(2026, 11, 1), "Taxi settled", None) is None   # nothing left
-    conn.execute("UPDATE user SET taxi_settled_at = '2026-11-05T00:00:00+00:00' WHERE user_id = ?", (ME,))
-    db.add_taxi(conn, ME, "earn", 100_00, "U", "in", "2026-11-10", "b")
+    assert (e["kind"], e["amount"], e["category_id"], e["taxi"]) == ("earn", 540_00, None, None)
     p = db.taxi_pool(conn, ME)
-    assert (p["received"], p["received_n"]) == (100_00, 1) and p["settled_at"]
-    assert len(db.taxi_log(conn, ME, *ALL)) == 2                    # the log keeps both
+    assert (p["received"], p["mine"], p["owed"], p["carry"]) == (0, 0, 540_00, 540_00) and p["settled_at"]
+    taxi(conn, "exp", 460_00, "split", PARTNER)                      # his share goes after
+    assert db.taxi_pool(conn, ME)["owed"] == 80_00
+    assert db.settle_taxi(conn, ME, dt.date(2026, 11, 13), "Taxi settled") is None   # no half to add
+    assert db.taxi_pool(conn, ME)["carry"] == 80_00
+    assert db.summary(conn, ME, *ALL)["earned"] == 540_00            # only your half counts
     assert db.taxi_pool(conn, OTHER)["settled_at"] is None
 
 

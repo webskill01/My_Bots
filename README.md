@@ -43,20 +43,23 @@ as an entry (tagged "bank"). It also keeps the balance from the latest alert.
 - An alert it can't read (e.g. a card swipe) shows on Entries as
   "Couldn't read a bank email". Add it by hand, then dismiss.
 
-Taxi bot payments don't enter the ledger one by one. They go to a separate log. On Entries, pick **Without taxi** (default),
+Taxi bot money goes under the one **taxi** category but stays out of every
+total and budget. On Entries, pick **Without taxi** (default),
 **Taxi & partner** or **All**:
 
-| Alert | Logged as |
+| Alert | Counted as |
 |---|---|
-| ₹90 or ₹45 in | in |
+| ₹90 or ₹45 in | payment |
 | ₹90 or ₹45 out, or whole ₹90s to the partner | refund |
 | any other amount to the partner, or anything from him | to partner |
 
-The taxi views show payments received, refunded, the partner's 50% of what's
-left, what was sent, what's still owed, and what's left with you, counted since
-the last **Settled up today**. Settling adds what's left with you as one
-earning under the **taxi** category, then starts the totals again. A real expense or earning that only looked like taxi
-money: tap it to move it into Entries and categorize it.
+Taxi rows edit like any entry: fix an amount a rider over- or under-paid, add
+your own under **taxi** (to or from the partner counts as "to partner"), or
+move one to another category if it wasn't taxi money. **Settled up today**
+adds your half (payments less refunds, halved) to earnings as one entry.
+What the partner is still due carries into the next round, so his share can
+be sent before or after settling. Hand entries under taxi from before the bot
+split stay ordinary earnings.
 
 ## Salary and budgets
 

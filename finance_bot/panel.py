@@ -109,14 +109,34 @@ def entry_json(e, tz: str) -> dict:
     return {"id": e["id"], "kind": e["kind"], "amount": e["amount"], "name": who(e["name"]),
             "category": e["category_name"], "category_id": e["category_id"],
             "on_date": e["on_date"], "time": clock(e["created_at"], tz),
-            "bank": bool(e["bank_ref"])}
+            "bank": bool(e["bank_ref"]), "taxi": e["taxi"], "settled": bool(e["taxi_done"])}
+
+
+def partners() -> str:
+    return f"{CFG['partner']},{CFG['partner_name']}"
+
+
+def with_taxi(conn, uid, f: dict, old=None) -> dict:
+    """In the taxi category it's taxi bot money, out of it it isn't. Older
+    hand entries already under taxi (your own share, from before the split)
+    stay ordinary; a bot row keeps its rule unless kind or partner changes."""
+    cat = db.find_category(conn, uid, bank.TAXI_CAT)
+    if not cat or f["category_id"] != cat["id"]:
+        f["taxi"] = None
+    elif old is not None and old["category_id"] == cat["id"]:
+        same = old["kind"] == f["kind"] and \
+            bank.is_partner(old["name"], partners()) == bank.is_partner(f["name"], partners())
+        f["taxi"] = old["taxi"] if old["taxi"] is None or same else bank.hand_rule(f["kind"], f["name"], partners())
+    else:
+        f["taxi"] = bank.hand_rule(f["kind"], f["name"], partners())
+    return f
 
 
 def recent_items(conn, uid: int, today: dt.date, tz: str, limit: int = 10) -> list[dict]:
     """What this person logs most often lately (chai, uber, rent), each with
     its last amount and category: one tap in the form fills a row."""
     seen: dict[tuple, dict] = {}
-    for e in db.list_entries(conn, uid, today - dt.timedelta(days=RECENT_DAYS), today):
+    for e in db.list_entries(conn, uid, today - dt.timedelta(days=RECENT_DAYS), today, taxi=False):
         if not e["name"]:
             continue
         key = (e["kind"], e["name"].lower())
@@ -147,15 +167,13 @@ def state(conn, user, month: str | None) -> dict:
         "budget": user["budget"],
         "me": {"name": user["name"], "admin": bool(user["is_admin"]),
                "has_password": bool(user["pw_hash"])},
-        "entries": [entry_json(e, user["tz"]) for e in db.list_entries(conn, uid, start, end)],
+        "entries": [entry_json(e, user["tz"]) for e in db.list_entries(conn, uid, start, end, taxi=False)],
         "months": [dict(m) for m in db.month_totals(conn, uid)],
         "categories": [dict(c) for c in db.category_counts(conn, uid)],
         "recent": recent_items(conn, uid, today, user["tz"]),
         "salary": db.salary_status(conn, uid, bank.SALARY),
         "taxi": db.taxi_pool(conn, uid),
-        "taxi_log": [{"id": t["id"], "kind": t["kind"], "amount": t["amount"], "party": who(t["party"]),
-                      "rule": t["rule"], "on_date": t["on_date"], "time": clock(t["created_at"], user["tz"])}
-                     for t in db.taxi_log(conn, uid, start, end)],
+        "taxi_log": [entry_json(e, user["tz"]) for e in db.list_entries(conn, uid, start, end, taxi=True)],
         "bank": bank_state(conn, user),
     }
 
@@ -375,8 +393,9 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
             raise ValueError("Start with an amount: 250 lunch, or +3000 salary")
         if p.amount > MAX_AMOUNT:
             raise ValueError("That amount looks too big")
-        eid = db.add_entry(conn, uid, p.kind, p.amount, p.name[:100],
-                           _category_id(conn, uid, p.category), p.on_date)
+        f = with_taxi(conn, uid, {"kind": p.kind, "amount": p.amount, "name": p.name[:100],
+                                  "category_id": _category_id(conn, uid, p.category), "on_date": p.on_date})
+        eid = db.add_entry(conn, uid, **f)
         return 200, {"entry": entry_json(db.get_entry(conn, uid, eid), user["tz"])}
 
     if path == "/api/entries":   # several items for one day, all or nothing
@@ -388,35 +407,28 @@ def act(conn, user, path: str, b: dict) -> tuple[int, dict]:
                 _amount(item.get("amount"))
             except ValueError as e:
                 raise ValueError(f"Item {i}: {e}") from None
-        rows = [fields_from(conn, uid, dict(item, on_date=b.get("on_date")), today) for item in items]
-        ids = [db.add_entry(conn, uid, f["kind"], f["amount"], f["name"], f["category_id"], f["on_date"])
-               for f in rows]
+        rows = [with_taxi(conn, uid, fields_from(conn, uid, dict(item, on_date=b.get("on_date")), today))
+                for item in items]
+        ids = [db.add_entry(conn, uid, **f) for f in rows]
         return 200, {"entries": [entry_json(db.get_entry(conn, uid, i), user["tz"]) for i in ids]}
 
     if path == "/api/entry":
-        f = fields_from(conn, uid, b, today)
-        eid = db.add_entry(conn, uid, f["kind"], f["amount"], f["name"], f["category_id"], f["on_date"])
+        eid = db.add_entry(conn, uid, **with_taxi(conn, uid, fields_from(conn, uid, b, today)))
         return 200, {"entry": entry_json(db.get_entry(conn, uid, eid), user["tz"])}
 
     if m := re.fullmatch(r"/api/entry/(\d+)(/delete)?", path):
-        if db.get_entry(conn, uid, int(m[1])) is None:
+        old = db.get_entry(conn, uid, int(m[1]))
+        if old is None:
             return 404, {"error": "That entry is gone"}
         if m[2]:
             db.delete_entry(conn, uid, int(m[1]))
             return 200, {"ok": True}
-        db.update_entry(conn, uid, int(m[1]), **fields_from(conn, uid, b, today))
+        db.update_entry(conn, uid, int(m[1]), **with_taxi(conn, uid, fields_from(conn, uid, b, today), old))
         return 200, {"entry": entry_json(db.get_entry(conn, uid, int(m[1])), user["tz"])}
 
-    if path == "/api/taxi/settle":   # squared up: the taxi money becomes one earning
-        eid = db.settle_taxi(conn, uid, today, f"Taxi bot · settled with {CFG['partner_name'] or 'partner'}",
-                             db.get_or_create_category(conn, uid, bank.TAXI_CAT))
+    if path == "/api/taxi/settle":   # squared up: your half becomes one earning
+        eid = db.settle_taxi(conn, uid, today, f"Taxi bot · settled with {CFG['partner_name'] or 'partner'}")
         return 200, {"entry": entry_json(db.get_entry(conn, uid, eid), user["tz"]) if eid else None}
-
-    if m := re.fullmatch(r"/api/taxi/(\d+)/legit", path):   # not taxi money after all
-        eid = db.taxi_to_ledger(conn, uid, int(m[1]))
-        if eid is None:
-            return 404, {"error": "That one is gone"}
-        return 200, {"entry": entry_json(db.get_entry(conn, uid, eid), user["tz"])}
 
     if m := re.fullmatch(r"/api/bank/miss/(\d+)/dismiss", path):
         db.drop_bank_miss(conn, uid, int(m[1]))

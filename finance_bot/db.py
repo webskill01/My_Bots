@@ -50,21 +50,6 @@ CREATE TABLE IF NOT EXISTS invite (
     claim_user INTEGER REFERENCES user(user_id)
 );
 
--- Taxi bot money (₹90 in, ₹90/₹45 out, transfers to the partner). Kept out of
--- the ledger: no category, no totals, no budgets. Just a log to divide by hand.
-CREATE TABLE IF NOT EXISTS taxi (
-    id         INTEGER PRIMARY KEY,
-    user_id    INTEGER NOT NULL REFERENCES user(user_id),
-    kind       TEXT NOT NULL CHECK (kind IN ('exp', 'earn')),
-    amount     INTEGER NOT NULL CHECK (amount > 0),
-    party      TEXT NOT NULL DEFAULT '',
-    rule       TEXT NOT NULL CHECK (rule IN ('in', 'refund', 'split')),
-    on_date    TEXT NOT NULL,
-    bank_ref   TEXT,
-    created_at TEXT NOT NULL,
-    UNIQUE (user_id, bank_ref)
-);
-
 -- Bank alert emails that looked like money but matched no known format.
 CREATE TABLE IF NOT EXISTS bank_miss (
     id          INTEGER PRIMARY KEY,
@@ -92,11 +77,16 @@ _LATER_COLUMNS = [
     ("user", "bank_uid", "INTEGER"),                    # last IMAP UID read; NULL = never started
     ("entry", "bank_ref", "TEXT"),                      # UPI ref / UTR when a bank alert filed it
     ("category", "budget", "INTEGER NOT NULL DEFAULT 0"),   # paise/month, 0 = off
-    ("user", "taxi_settled_at", "TEXT"),                # UTC; the taxi pool counts from here
+    ("user", "taxi_settled_at", "TEXT"),                # UTC, the last settle-up
+    ("user", "taxi_carry", "INTEGER NOT NULL DEFAULT 0"),   # paise still due to the partner after it
+    # Taxi bot money: 'in' / 'refund' / 'split', NULL = an ordinary entry. Kept
+    # out of every total; settling adds your half as one ordinary entry.
+    ("entry", "taxi", "TEXT"),
+    ("entry", "taxi_done", "INTEGER NOT NULL DEFAULT 0"),   # 1 once settled
 ]
 
 _SETTINGS = {"tz", "currency", "budget"}
-_EDITABLE = {"kind", "amount", "name", "category_id", "on_date"}
+_EDITABLE = {"kind", "amount", "name", "category_id", "on_date", "taxi"}
 
 ANY_CATEGORY = object()  # distinct from None, which means "uncategorized"
 
@@ -110,7 +100,6 @@ def connect(path: str) -> sqlite3.Connection:
 
 def init(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode = WAL")   # the panel's threads read while one writes
-    had_taxi = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'taxi'").fetchone()
     conn.executescript(SCHEMA)
     for table, column, decl in _LATER_COLUMNS:
         existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -121,31 +110,27 @@ def init(conn: sqlite3.Connection) -> None:
     # one entry per bank transaction, however often its alert is read
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS entry_bank_ref ON entry(user_id, bank_ref)"
                  " WHERE bank_ref IS NOT NULL")
-    if not had_taxi:
-        _move_taxi_out_of_ledger(conn)
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+        _taxi_into_ledger(conn)
+        conn.execute("PRAGMA user_version = 1")
     conn.commit()
 
 
-_OLD_TAXI = ("taxi bot unclaimed", "taxi bot refund", "taxi bot split")
-
-
-def _move_taxi_out_of_ledger(conn) -> None:
-    """Once, when the taxi table first appears: entries in the old taxi bot
-    categories, and uncategorized ₹90/₹45 bank entries, move to the taxi log.
-    The three categories go too."""
-    rows = conn.execute(
-        "SELECT e.*, lower(c.name) AS cat FROM entry e LEFT JOIN category c ON c.id = e.category_id"
-        " WHERE lower(c.name) IN (?, ?, ?)"
-        " OR (e.category_id IS NULL AND e.bank_ref IS NOT NULL AND e.amount IN (9000, 4500))",
-        _OLD_TAXI).fetchall()
-    for e in rows:
-        rule = "in" if e["kind"] == "earn" else "split" if e["cat"] == "taxi bot split" else "refund"
-        conn.execute("INSERT OR IGNORE INTO taxi (user_id, kind, amount, party, rule, on_date,"
-                     " bank_ref, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                     (e["user_id"], e["kind"], e["amount"], e["name"], rule, e["on_date"],
-                      e["bank_ref"], e["created_at"]))
-        conn.execute("DELETE FROM entry WHERE id = ?", (e["id"],))
-    conn.execute("DELETE FROM category WHERE lower(name) IN (?, ?, ?)", _OLD_TAXI)
+def _taxi_into_ledger(conn) -> None:
+    """Once: rows of the old separate taxi log become entries in the "taxi"
+    category, so they can be edited like any other. Already-settled rows come
+    in settled. The old table is left as it was."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'taxi'").fetchone():
+        return
+    for t in conn.execute("SELECT t.*, u.taxi_settled_at AS settled FROM taxi t"
+                          " JOIN user u ON u.user_id = t.user_id").fetchall():
+        conn.execute(
+            "INSERT OR IGNORE INTO entry (user_id, kind, amount, name, category_id, on_date,"
+            " created_at, bank_ref, taxi, taxi_done) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (t["user_id"], t["kind"], t["amount"], t["party"],
+             get_or_create_category(conn, t["user_id"], "taxi"),
+             t["on_date"], t["created_at"], t["bank_ref"], t["rule"],
+             int(bool(t["settled"]) and t["created_at"] <= t["settled"])))
 
 
 def _now() -> str:
@@ -179,22 +164,23 @@ def user_today(user_row) -> dt.date:
 # --- entries ----------------------------------------------------------------
 
 def add_entry(conn, user_id: int, kind: str, amount: int, name: str,
-              category_id: int | None, on_date) -> int:
+              category_id: int | None, on_date, taxi: str | None = None) -> int:
     cur = conn.execute(
-        "INSERT INTO entry (user_id, kind, amount, name, category_id, on_date, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, kind, amount, name, category_id, _iso(on_date), _now()))
+        "INSERT INTO entry (user_id, kind, amount, name, category_id, on_date, created_at, taxi)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, kind, amount, name, category_id, _iso(on_date), _now(), taxi))
     conn.commit()
     return cur.lastrowid
 
 
 def add_bank_entry(conn, user_id: int, kind: str, amount: int, name: str,
-                   category_id: int | None, on_date, bank_ref: str) -> int | None:
+                   category_id: int | None, on_date, bank_ref: str,
+                   taxi: str | None = None) -> int | None:
     """None when this transaction is already in the ledger."""
     cur = conn.execute(
         "INSERT OR IGNORE INTO entry (user_id, kind, amount, name, category_id, on_date,"
-        " created_at, bank_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, kind, amount, name, category_id, _iso(on_date), _now(), bank_ref))
+        " created_at, bank_ref, taxi) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, kind, amount, name, category_id, _iso(on_date), _now(), bank_ref, taxi))
     conn.commit()
     return cur.lastrowid if cur.rowcount else None
 
@@ -228,11 +214,15 @@ def delete_entry(conn, user_id: int, entry_id: int) -> bool:
 
 
 def list_entries(conn, user_id: int, start, end, limit: int | None = None,
-                 offset: int = 0, category_id=ANY_CATEGORY, kind: str | None = None):
+                 offset: int = 0, category_id=ANY_CATEGORY, kind: str | None = None,
+                 taxi: bool | None = None):
+    """`taxi`: True only taxi bot money, False none of it, None both."""
     sql = ("SELECT e.*, c.name AS category_name FROM entry e"
            " LEFT JOIN category c ON c.id = e.category_id"
            " WHERE e.user_id = ? AND e.on_date BETWEEN ? AND ?")
     args = [user_id, _iso(start), _iso(end)]
+    if taxi is not None:
+        sql += " AND e.taxi IS NOT NULL" if taxi else " AND e.taxi IS NULL"
     if category_id is not ANY_CATEGORY:
         sql += " AND e.category_id IS ?"
         args.append(category_id)
@@ -321,17 +311,17 @@ def summary(conn, user_id: int, start, end) -> dict:
         "SELECT COALESCE(SUM(CASE WHEN kind = 'exp'  THEN amount END), 0) AS spent,"
         "       COALESCE(SUM(CASE WHEN kind = 'earn' THEN amount END), 0) AS earned,"
         "       COUNT(*) AS count"
-        " FROM entry WHERE user_id = ? AND on_date BETWEEN ? AND ?", args).fetchone()
+        " FROM entry WHERE user_id = ? AND on_date BETWEEN ? AND ? AND taxi IS NULL", args).fetchone()
     top = conn.execute(
         "SELECT name, SUM(amount) AS total FROM entry"
-        " WHERE user_id = ? AND kind = 'exp' AND on_date BETWEEN ? AND ?"
+        " WHERE user_id = ? AND kind = 'exp' AND on_date BETWEEN ? AND ? AND taxi IS NULL"
         " GROUP BY name COLLATE NOCASE ORDER BY total DESC LIMIT 3", args).fetchall()
     return {"spent": row["spent"], "earned": row["earned"],
             "net": row["earned"] - row["spent"], "count": row["count"], "top": top}
 
 
 def day_report(conn, user_id: int, on_date) -> dict:
-    entries = list_entries(conn, user_id, on_date, on_date)
+    entries = list_entries(conn, user_id, on_date, on_date, taxi=False)
     spent = sum(e["amount"] for e in entries if e["kind"] == "exp")
     earned = sum(e["amount"] for e in entries if e["kind"] == "earn")
     return {"spent": spent, "earned": earned, "net": earned - spent, "entries": entries}
@@ -344,7 +334,7 @@ def category_totals(conn, user_id: int, start, end, kind: str = "exp"):
         "SELECT c.id AS category_id, c.name AS name,"
         "       SUM(e.amount) AS total, COUNT(*) AS count"
         " FROM entry e LEFT JOIN category c ON c.id = e.category_id"
-        " WHERE e.user_id = ? AND e.kind = ? AND e.on_date BETWEEN ? AND ?"
+        " WHERE e.user_id = ? AND e.kind = ? AND e.on_date BETWEEN ? AND ? AND e.taxi IS NULL"
         " GROUP BY e.category_id"
         " ORDER BY (c.name IS NULL), total DESC",
         (user_id, kind, _iso(start), _iso(end))).fetchall()
@@ -357,7 +347,7 @@ def month_totals(conn, user_id: int):
         "       COALESCE(SUM(CASE WHEN kind = 'exp'  THEN amount END), 0) AS spent,"
         "       COALESCE(SUM(CASE WHEN kind = 'earn' THEN amount END), 0) AS earned,"
         "       COUNT(*) AS count"
-        " FROM entry WHERE user_id = ? GROUP BY month ORDER BY month DESC",
+        " FROM entry WHERE user_id = ? AND taxi IS NULL GROUP BY month ORDER BY month DESC",
         (user_id,)).fetchall()
 
 
@@ -369,79 +359,49 @@ def category_counts(conn, user_id: int):
         " WHERE c.user_id = ? GROUP BY c.id ORDER BY c.name", (user_id,)).fetchall()
 
 
+_POOL = "user_id = ? AND taxi IS NOT NULL AND taxi_done = 0"
+
+
 def taxi_pool(conn, user_id: int) -> dict:
-    """Since the last settle-up: what came in, what was refunded, what went to
-    the partner (less anything he sent back). The partner's half is of what's
-    left after refunds; `mine` is the cash the taxi bot left with you."""
-    since = conn.execute("SELECT taxi_settled_at FROM user WHERE user_id = ?",
-                         (user_id,)).fetchone()[0]
-    got = {r["rule"]: r for r in conn.execute(
-        "SELECT rule, COUNT(*) AS n, SUM(CASE WHEN kind = 'exp' THEN amount ELSE -amount END) AS total"
-        " FROM taxi WHERE user_id = ? AND created_at > ? GROUP BY rule", (user_id, since or ""))}
+    """Taxi bot money not yet settled. Refunds come off what came in, the rest
+    is split in half. `owed` is what the partner is still due (negative: he
+    owes you), including what was left over at the last settle-up."""
+    u = conn.execute("SELECT taxi_settled_at, taxi_carry FROM user WHERE user_id = ?",
+                     (user_id,)).fetchone()
+    got = {r["taxi"]: r for r in conn.execute(
+        "SELECT taxi, COUNT(*) AS n, SUM(CASE WHEN kind = 'exp' THEN amount ELSE -amount END) AS total"
+        f" FROM entry WHERE {_POOL} GROUP BY taxi", (user_id,))}
     r, f, s = ({"n": 0, "total": 0} | dict(got.get(k) or {}) for k in ("in", "refund", "split"))
-    received = -r["total"]   # 'in' rows are all earnings
-    half = (received - f["total"]) // 2
+    received = -r["total"]   # money in counts up
+    net = received - f["total"]
+    half = net // 2
     return {"received": received, "received_n": r["n"], "refunded": f["total"],
             "refunded_n": f["n"], "sent": s["total"], "sent_n": s["n"],
-            "partner_half": half, "owed": half - s["total"],
-            "mine": received - f["total"] - s["total"], "settled_at": since}
+            "partner_half": half, "mine": net - half, "carry": u["taxi_carry"],
+            "owed": u["taxi_carry"] + half - s["total"], "settled_at": u["taxi_settled_at"]}
 
 
-def settle_taxi(conn, user_id: int, on_date, name: str, category_id: int | None) -> int | None:
-    """Squared up with the partner: what the taxi bot left with you since the
-    last settle-up becomes one ledger entry, and the pool starts again. The
-    entry's id, or None when there was nothing to add."""
+def settle_taxi(conn, user_id: int, on_date, name: str) -> int | None:
+    """Your half of the unsettled taxi money becomes one ordinary entry; what
+    the partner is still due carries over, so it doesn't matter whether his
+    share was sent before or after. The entry's id, or None if nothing to add."""
     conn.execute("BEGIN IMMEDIATE")   # no bank alert slips in between the sum and the mark
     try:
-        mine, eid = taxi_pool(conn, user_id)["mine"], None
-        if mine:
+        p, eid = taxi_pool(conn, user_id), None
+        if p["mine"]:
             eid = conn.execute(
-                "INSERT INTO entry (user_id, kind, amount, name, category_id, on_date, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (user_id, "earn" if mine > 0 else "exp", abs(mine), name, category_id,
+                "INSERT INTO entry (user_id, kind, amount, name, on_date, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, "earn" if p["mine"] > 0 else "exp", abs(p["mine"]), name,
                  _iso(on_date), _now())).lastrowid
-        conn.execute("UPDATE user SET taxi_settled_at = ? WHERE user_id = ?", (_now(), user_id))
+        conn.execute(f"UPDATE entry SET taxi_done = 1 WHERE {_POOL}", (user_id,))
+        conn.execute("UPDATE user SET taxi_settled_at = ?, taxi_carry = ? WHERE user_id = ?",
+                     (_now(), p["owed"], user_id))
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
     return eid
-
-
-def taxi_log(conn, user_id: int, start, end):
-    return conn.execute(
-        "SELECT * FROM taxi WHERE user_id = ? AND on_date BETWEEN ? AND ?"
-        " ORDER BY on_date DESC, id DESC", (user_id, _iso(start), _iso(end))).fetchall()
-
-
-def add_taxi(conn, user_id: int, kind: str, amount: int, party: str, rule: str,
-             on_date, bank_ref: str) -> int | None:
-    """None when already logged, or already moved to the ledger as legit."""
-    if conn.execute("SELECT 1 FROM entry WHERE user_id = ? AND bank_ref = ?",
-                    (user_id, bank_ref)).fetchone():
-        return None
-    cur = conn.execute(
-        "INSERT OR IGNORE INTO taxi (user_id, kind, amount, party, rule, on_date, bank_ref,"
-        " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, kind, amount, party, rule, _iso(on_date), bank_ref, _now()))
-    conn.commit()
-    return cur.lastrowid if cur.rowcount else None
-
-
-def taxi_to_ledger(conn, user_id: int, taxi_id: int) -> int | None:
-    """A real expense or earning that only looked like taxi money: it becomes
-    an uncategorized ledger entry. The new entry's id, or None if it's gone."""
-    t = conn.execute("SELECT * FROM taxi WHERE id = ? AND user_id = ?",
-                     (taxi_id, user_id)).fetchone()
-    if t is None:
-        return None
-    cur = conn.execute(
-        "INSERT INTO entry (user_id, kind, amount, name, on_date, created_at, bank_ref)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, t["kind"], t["amount"], t["party"], t["on_date"], t["created_at"], t["bank_ref"]))
-    conn.execute("DELETE FROM taxi WHERE id = ?", (taxi_id,))
-    conn.commit()
-    return cur.lastrowid
 
 
 def salary_status(conn, user_id: int, salary: str) -> dict | None:
@@ -455,7 +415,7 @@ def salary_status(conn, user_id: int, salary: str) -> dict | None:
         return None
     spent = conn.execute(
         "SELECT COALESCE(SUM(amount), 0) FROM entry"
-        " WHERE user_id = ? AND kind = 'exp' AND on_date >= ?",
+        " WHERE user_id = ? AND kind = 'exp' AND on_date >= ? AND taxi IS NULL",
         (user_id, pay["on_date"])).fetchone()[0]
     return {"on_date": pay["on_date"], "amount": pay["amount"], "spent": spent,
             "left": pay["amount"] - spent}
